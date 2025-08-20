@@ -37,10 +37,13 @@ namespace Peak.BotClone
 
         float DESPAWN_DIST        => settings?.despawnDistance ?? 100f;
 
-        float STAM_REST_THRESH    => settings?.stamRest   ?? 0.15f;
-        float STAM_SPRINT_THRESH  => settings?.stamSprint ?? 0.35f;
-        float STAM_CLIMB_THRESH   => settings?.stamClimb  ?? 0.20f;
-        float STAM_ATTACH_THRESH  => settings?.stamAttach ?? 0.40f;
+        // Threshold semantics (regular-only mindset):
+        // - FRACTION fields are fractions of the regular bar (0..1, affected by afflictions).
+        // - ABS fields are absolute regular units (0..RegularMax()).
+        float STAM_REST_FRAC   => settings?.stamRest   ?? 0.30f; // begin resting at/under this regular fraction
+        float STAM_SPRINT_FRAC => settings?.stamSprint ?? 0.25f; // need this regular fraction to sprint
+        float STAM_CLIMB_FRAC  => settings?.stamClimb  ?? 0.20f; // need this regular fraction for simple climbs/jumps
+        float STAM_ATTACH_ABS  => settings?.stamAttach ?? 0.40f; // absolute regular units required to attempt wall-attach jump
 
         int   MAX_NAV_EVAL_NODES  => settings?.maxNavEvalNodes ?? 200;
         float DETOUR_FACTOR       => settings?.detourFactor    ?? 1.4f;
@@ -60,7 +63,7 @@ namespace Peak.BotClone
         int terrainMask;
         float nextLedgeAttempt;
 
-                internal void Init(Character target, float sprintDist, BotCloneSettings? s = null)
+        internal void Init(Character target, float sprintDist, BotCloneSettings? s = null)
         {
             player = target;
             sprintRadius = sprintDist;
@@ -137,8 +140,8 @@ namespace Peak.BotClone
                 return;
             }
 
-            // ── force drop if hanging too long or out of stamina ───────────
-            if (ch.data.isClimbing && (Low(STAM_REST_THRESH) || ch.data.sinceClimb > MAX_WALL_HANG))
+            // ── force drop if hanging too long or low regular stamina ──────
+            if (ch.data.isClimbing && (RegularFrac() < STAM_CLIMB_FRAC || ch.data.sinceClimb > HangCap()))
                 ch.refs.climbing.StopClimbing();
 
             // ── 1. NavMesh steering (primary) ──────────────────────────────
@@ -161,33 +164,35 @@ namespace Peak.BotClone
             // ── baseline forward input (or zero if resting) ───────────────
             ch.input.movementInput = resting ? Vector2.zero : Vector2.up;
 
-            // ── Stamina State Machine ──────────────────────────────────────
+            // ── Stamina State Machine (regular-only) ───────────────────────
             if (resting)
             {
-                if (!Low(STAM_SPRINT_THRESH))
+                // Leave rest with small hysteresis once we’re healthy again
+                if (RegularFrac() >= (STAM_REST_FRAC + 0.10f))
                     resting = false;
             }
-            else if (Low(STAM_REST_THRESH))
+            else if (RegularFrac() <= STAM_REST_FRAC)
             {
                 resting = true;
             }
-        
-            
-            bool sprinting = bot.IsSprinting;
-            float distToPlayer = Vector3.Distance(ch.Center, player.Center);
-            bool canToggle = Time.time >= nextSprintToggle;
 
-            if (resting || Low(STAM_SPRINT_THRESH) || ch.data.isClimbing)
+            // Sprint gating: only when not resting, not climbing, and regular bar healthy enough
+            bool sprinting   = bot.IsSprinting;
+            float distToPlayer = Vector3.Distance(ch.Center, player.Center);
+            bool canToggle   = Time.time >= nextSprintToggle;
+            bool lowRegular  = RegularFrac() < STAM_SPRINT_FRAC;
+
+            if (resting || lowRegular || ch.data.isClimbing)
             {
                 if (sprinting && canToggle) { bot.IsSprinting = false; nextSprintToggle = Time.time + 0.25f; }
             }
             else
             {
-                bool wantSprint = navDir.sqrMagnitude > 1e-4f && distToPlayer >= sprintEnterDist;
+                bool wantSprint = navDir.sqrMagnitude > 1e-4f && distToPlayer >= sprintEnterDist && !lowRegular;
                 bool stopSprint = distToPlayer <= sprintExitDist;
 
-                if (!sprinting && wantSprint && canToggle) { bot.IsSprinting = true;  nextSprintToggle = Time.time + 0.25f; }
-                else if (sprinting && stopSprint && canToggle) { bot.IsSprinting = false; nextSprintToggle = Time.time + 0.25f; }
+                if (!sprinting && wantSprint && canToggle)      { bot.IsSprinting = true;  nextSprintToggle = Time.time + 0.25f; }
+                else if (sprinting && stopSprint && canToggle)  { bot.IsSprinting = false; nextSprintToggle = Time.time + 0.25f; }
             }
 
             bot.LookDirection = navDir;
@@ -199,7 +204,7 @@ namespace Peak.BotClone
                 stuckTime = 0f;
             lastPos = ch.Center;
 
-            if (stuckTime > 1.5f && !ch.data.isClimbing && !Low(STAM_CLIMB_THRESH))
+            if (stuckTime > 1.5f && !ch.data.isClimbing && RegularFrac() >= STAM_CLIMB_FRAC && !RecentlyExhausted())
             {
                 Debug.LogWarning($"[AI] I've been stuck here for {stuckTime:F1}s. I am one with this fucking wall.");
                 // poke a climb in case we're blocked by a knee-high ledge
@@ -207,6 +212,26 @@ namespace Peak.BotClone
                 current = null; // reset NavPoint path
                 stuckTime = 0f;
             }
+
+            // ── Regen correctness while resting ────────────────────────────
+            if (resting)
+            {
+                // stop consuming
+                bot.IsSprinting = false;
+                ch.input.movementInput = Vector2.zero;
+
+                if (ch.data.currentClimbHandle == null && ch.data.isClimbing)
+                    ch.refs.climbing.StopClimbing();
+                // else: when on a handle, keep inputs quiet to avoid canceling hang (regen allowed anywhere).
+            }
+        }
+
+        // Scale hang cap by low-stamina modifier so we drop sooner when nearly empty
+        float HangCap()
+        {
+            // staminaMod ∈ [0.2, 1]; lower when empty.
+            float mod01 = Mathf.InverseLerp(0.2f, 1f, ch.data.staminaMod);
+            return Mathf.Lerp(1.5f, MAX_WALL_HANG, mod01);
         }
     }
 }

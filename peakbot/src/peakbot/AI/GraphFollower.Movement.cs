@@ -14,10 +14,10 @@ namespace Peak.BotClone
             // if intentionally resting, don’t waste energy or attempts
             if (resting) return;
 
-            bool staminaOK = !Low(STAM_CLIMB_THRESH);
+            bool staminaOK = RegularFrac() >= STAM_CLIMB_FRAC;
 
             // ── 1. WALL-ATTACH JUMP ───────────────────────────────────────
-            if (staminaOK && ch.data.isGrounded && !ch.data.isClimbing && Time.time >= nextWallAttempt && !Low(STAM_ATTACH_THRESH))
+            if (staminaOK && !RecentlyExhausted() && ch.data.isGrounded && !ch.data.isClimbing && Time.time >= nextWallAttempt && Regular() >= STAM_ATTACH_ABS)
             {
                 const float wallProbeDist   = 1.6f;
                 const float maxAttachHeight = 12.0f;
@@ -31,32 +31,45 @@ namespace Peak.BotClone
 
                     if (tallEnough && steepWall)
                     {
-                        float around = EstimateNavDistance(ch.Center, player.Center);
-                        float direct = Vector3.Distance(ch.Center, player.Center);
-                        bool worthClimb = around > direct * DETOUR_FACTOR;
-                        Debug.Log($"[WallAttach] around={around:F2}, direct={direct:F2}, DETOUR_FACTOR={DETOUR_FACTOR}, worthClimb={worthClimb}");
-
-                        if (worthClimb)
+                        // Budget attach tax from planar distance + burst + headroom
+                        float planar    = Vector3.ProjectOnPlane(hit.point - ch.Center, Vector3.up).magnitude;
+                        float attachTax = 0.15f * planar;  // StartClimb tax (absolute regular units)
+                        float burst     = 0.20f;           // potential RPCA_ClimbJump later
+                        float headroom  = 0.10f;           // one tick + safety
+                        if (Regular() < (attachTax + burst + headroom))
                         {
-                            // try the physics jump + mid-air attach
-                            StartCoroutine(JumpAndAttach());
-                            nextWallAttempt = Time.time + attachFailDelay;
-                            Debug.Log($"[WallAttach] nextWallAttempt set to {nextWallAttempt:F2}, attachFailDelay was {attachFailDelay:F2}");
-
-                            attachFailDelay = Mathf.Min(attachFailDelay * 2f, 4f); // exponential back-off
+                            // Not enough regular to complete the opening sequence; path around and retry later.
+                            nextWallAttempt = Time.time + 1f;
                         }
                         else
                         {
-                            // path around instead; retry after 1 s
-                            Debug.Log("[WallAttach] not worth climb; path around instead");
-                            nextWallAttempt = Time.time + 1f;
+                            float around = EstimateNavDistance(ch.Center, player.Center);
+                            float direct = Vector3.Distance(ch.Center, player.Center);
+                            bool worthClimb = around > direct * DETOUR_FACTOR;
+                            Debug.Log($"[WallAttach] around={around:F2}, direct={direct:F2}, DETOUR_FACTOR={DETOUR_FACTOR}, worthClimb={worthClimb}");
+
+                            if (worthClimb)
+                            {
+                                // try the physics jump + mid-air attach
+                                StartCoroutine(JumpAndAttach());
+                                nextWallAttempt = Time.time + attachFailDelay;
+                                Debug.Log($"[WallAttach] nextWallAttempt set to {nextWallAttempt:F2}, attachFailDelay was {attachFailDelay:F2}");
+
+                                attachFailDelay = Mathf.Min(attachFailDelay * 2f, 4f); // exponential back-off
+                            }
+                            else
+                            {
+                                // path around instead; retry after 1 s
+                                Debug.Log("[WallAttach] not worth climb; path around instead");
+                                nextWallAttempt = Time.time + 1f;
+                            }
                         }
                     }
                 }
             }
 
             // ── 2. face-block small step / simple climb ───────────────────
-            if (staminaOK && !ch.data.isClimbing)
+            if (staminaOK && !ch.data.isClimbing && !RecentlyExhausted())
             {
                 Debug.Log($"[StepClimb] Checking for small obstacle; climbing={ch.data.isClimbing}");
 
@@ -83,7 +96,7 @@ namespace Peak.BotClone
             }
 
             // ── 3. ledge-gap detection ------------------------------------
-            if (staminaOK && Time.time >= nextLedgeAttempt && ch.data.isGrounded && !ch.data.isClimbing)
+            if (staminaOK && !RecentlyExhausted() && Time.time >= nextLedgeAttempt && ch.data.isGrounded && !ch.data.isClimbing)
             {
                 Vector3 probe = ch.Center + moveDir.normalized * 0.8f + Vector3.up * 0.3f;
                 bool groundAhead = Physics.Raycast(probe, Vector3.down, 1.8f, terrainMask);

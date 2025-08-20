@@ -22,11 +22,18 @@ namespace Peak.BotClone.Config
         [Min(0f)]
         public float despawnDistance = 100f;
 
-        [Header("Stamina thresholds (fractions 0..1)")]
-        [Range(0f, 1f)] public float stamRest   = 0.15f; // ≤15% ⇒ rest
-        [Range(0f, 1f)] public float stamSprint = 0.35f; // need ≥35% to sprint
-        [Range(0f, 1f)] public float stamClimb  = 0.20f; // require ≥20% for simple climb / jump
-        [Range(0f, 1f)] public float stamAttach = 0.40f; // need ≥40% to attempt wall-attach jump
+        [Header("Stamina thresholds")]
+        [Tooltip("REGULAR FRACTION (0..1). When the regular bar falls to this fraction or below, the bot enters a regen-rest state.")]
+        [Range(0f, 1f)] public float stamRest   = 0.30f;
+
+        [Tooltip("REGULAR FRACTION (0..1). Minimum regular-bar fraction to start/keep sprinting.")]
+        [Range(0f, 1f)] public float stamSprint = 0.25f;
+
+        [Tooltip("REGULAR FRACTION (0..1). Minimum regular-bar fraction to attempt simple climbs, hops, and ledge jumps.")]
+        [Range(0f, 1f)] public float stamClimb  = 0.20f;
+
+        [Tooltip("REGULAR ABSOLUTE UNITS (0..1). Minimum regular stamina required to attempt a wall-attach jump (covers attach tax + one burst + headroom).")]
+        [Range(0f, 1f)] public float stamAttach = 0.40f;
 
         [Header("Climb / Detour / Limits")]
         [Tooltip("Attempt climbs only if going around is this many times longer than direct.")]
@@ -37,7 +44,7 @@ namespace Peak.BotClone.Config
         [Min(1)]
         public int maxNavEvalNodes = 200;
 
-        [Tooltip("Maximum time the clone will remain wall-hanging before forcing a drop.")]
+        [Tooltip("Maximum time the clone will remain wall-hanging before forcing a drop (scaled down automatically when stamina is low).")]
         [Min(0f)]
         public float maxWallHang = 3f;
 
