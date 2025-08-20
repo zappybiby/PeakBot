@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using UnityEngine;
 using UnityEngine.AI;
+using Peak.BotClone.Config;
 
 namespace Peak.BotClone
 {
@@ -13,43 +14,41 @@ namespace Peak.BotClone
     /// </summary>
     internal partial class GraphFollower : MonoBehaviour
     {
-        // — references (assigned in Awake) -----------------------------------
+        // — references (assigned in Awake/Init) ------------------------------
         Character player = null!;
         Bot       bot    = null!;
         Character ch     = null!;
+        BotCloneSettings? settings; // optional; when null we use literals below
 
         // — NavPoint graph ---------------------------------------------------
         readonly List<NavPoint> allNodes = new();
         NavPoint? current;                         // current graph node target
-        const float NODE_REACH = 1f;
+        const float NODE_REACH = 1f;               // keep literal by design
 
         float sprintRadius;                        // distance threshold from Init()
 
-        // — ledge-gap sampling constants ------------------------------------
-        const int   LEDGE_CASTS    = 60;
-        const float LEDGE_RADIUS   = 1.0f;
-        const float LEDGE_HEIGHT   = 1.5f;
-        const float LEDGE_MAX_DIST = 4f;
+        // — values driven by settings (with literal fallbacks) ---------------
+        // Use properties so there’s no duplicated state: if settings exist, use them; else use literals.
+        int   LEDGE_CASTS    => settings?.ledgeCasts    ?? 60;
+        float LEDGE_RADIUS   => settings?.ledgeRadius   ?? 1.0f;
+        float LEDGE_HEIGHT   => settings?.ledgeHeight   ?? 1.5f;
+        float LEDGE_MAX_DIST => settings?.ledgeMaxDist  ?? 4f;
 
-        // — despawn distance -------------------------------------------------
-        const float DESPAWN_DIST = 100f;
+        float DESPAWN_DIST        => settings?.despawnDistance ?? 100f;
 
-        // — stamina thresholds (kept here for now; can be moved to settings) -
-        const float STAM_REST_THRESH   = 0.15f; // ≤15 % ⇒ rest
-        const float STAM_SPRINT_THRESH = 0.35f; // need ≥35 % to sprint
-        const float STAM_CLIMB_THRESH  = 0.20f; // require ≥20 % for simple climb / jump
-        const float STAM_ATTACH_THRESH = 0.40f; // need ≥40 % to attempt wall-attach jump
+        float STAM_REST_THRESH    => settings?.stamRest   ?? 0.15f;
+        float STAM_SPRINT_THRESH  => settings?.stamSprint ?? 0.35f;
+        float STAM_CLIMB_THRESH   => settings?.stamClimb  ?? 0.20f;
+        float STAM_ATTACH_THRESH  => settings?.stamAttach ?? 0.40f;
 
-        bool resting;                              // true while intentionally idling to regen
+        int   MAX_NAV_EVAL_NODES  => settings?.maxNavEvalNodes ?? 200;
+        float DETOUR_FACTOR       => settings?.detourFactor    ?? 1.4f;
+        float MAX_WALL_HANG       => settings?.maxWallHang     ?? 3f;
 
-        // — wall-attach back-off --------------------------------------------
+        // — runtime state ----------------------------------------------------
+        bool  resting;                              // true while intentionally idling to regen
         float nextWallAttempt;
         float attachFailDelay = 1f;                // doubles each fail, resets on success (1→2→4 s)
-        const float MAX_WALL_HANG = 3f;
-
-        // — NavPoint detour evaluation --------------------------------------
-        const int   MAX_NAV_EVAL_NODES = 200;      // hard cap for BFS
-        const float DETOUR_FACTOR       = 1.4f;    // climb only if detour > 1.4× direct
 
         static readonly MethodInfo? MI_TryClimb = typeof(CharacterClimbing)
             .GetMethod("TryClimb", BindingFlags.Instance | BindingFlags.NonPublic);
@@ -61,8 +60,12 @@ namespace Peak.BotClone
         float nextLedgeAttempt;
 
         // — public entry -----------------------------------------------------
-        internal void Init(Character target, float sprintDist)
-        { player = target; sprintRadius = sprintDist; }
+        internal void Init(Character target, float sprintDist, BotCloneSettings? s = null)
+        {
+            player = target;
+            sprintRadius = sprintDist;
+            settings = s; // if null, properties fall back to literals
+        }
 
         void Awake()
         {

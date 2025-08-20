@@ -42,7 +42,8 @@ namespace Peak.BotClone
                 mv.movementSpeed *= speedMult;
 
             var follower = clone.AddComponent<GraphFollower>();
-            follower.Init(me, sprintDistance);
+            // pass settings through so GraphFollower can read the main tunables
+            follower.Init(me, sprintDistance, s);
             clone.AddComponent<NavDiag>();
 
             var boar = clone.GetComponent<BotBoar>();

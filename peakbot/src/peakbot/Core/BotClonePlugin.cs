@@ -9,7 +9,7 @@ namespace Peak.BotClone
     [BepInPlugin("pharmacomaniac.botclone.graph", "Bot Clone (NavMesh+Graph)", "4.7.0")]
     public class BotClonePlugin : BaseUnityPlugin
     {
-        [SerializeField] Peak.BotClone.Config.BotCloneSettings? settings;  // nullable
+        [SerializeField] Peak.BotClone.Config.BotCloneSettings? settings = null;
 
         void Start()
         {
@@ -39,7 +39,7 @@ namespace Peak.BotClone
         void Update()
         {
             if (Input.GetKeyDown(KeyCode.F10) || (UnityEngine.InputSystem.Keyboard.current?.f10Key.wasPressedThisFrame ?? false))
-                CloneSpawner.Spawn(settings, this.Logger); // accepts null now
+                CloneSpawner.Spawn(settings, this.Logger);
         }
     }
 }

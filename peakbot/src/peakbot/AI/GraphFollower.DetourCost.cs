@@ -8,23 +8,25 @@ namespace Peak.BotClone
     {
         /// <summary>
         /// Returns an approximate path length through the NavPoint graph from 'from' to 'to'.
-        /// Uses a capped BFS (MAX_NAV_EVAL_NODES) so it’s O(n) and GC-free.
+        /// Uses a capped BFS (MAX_NAV_EVAL_NODES from settings) so it’s O(n) and GC-light.
         /// Returns Mathf.Infinity if no valid chain found under the cap.
         /// </summary>
         float EstimateNavDistance(Vector3 from, Vector3 to)
         {
             if (allNodes.Count == 0) return Mathf.Infinity;
+
             NavPoint start = NearestNode(from);
             NavPoint goal  = NearestNode(to);
             if (start == null || goal == null) return Mathf.Infinity;
 
             var queue = new Queue<NavPoint>();
-            var cost  = new Dictionary<NavPoint, float>();
+            var cost  = new Dictionary<NavPoint, float>(64);
+
             queue.Enqueue(start);
             cost[start] = 0f;
 
             int nodes = 0;
-            while (queue.Count > 0 && nodes < MAX_NAV_EVAL_NODES)
+            while (queue.Count > 0 && nodes < MAX_NAV_EVAL_NODES) // ← cap set from BotCloneSettings
             {
                 nodes++;
                 var n = queue.Dequeue();
@@ -41,12 +43,16 @@ namespace Peak.BotClone
                     }
                 }
             }
+
             return Mathf.Infinity; // capped out or unattached graph
         }
 
+        // Note: returns null if no nodes exist; callers guard for null.
         NavPoint NearestNode(Vector3 pos)
         {
-            NavPoint best = null; float bestD = float.MaxValue;
+            NavPoint best = null;
+            float bestD = float.MaxValue;
+
             foreach (var n in allNodes)
             {
                 float d = Vector3.Distance(pos, n.transform.position);
