@@ -26,9 +26,10 @@ namespace Peak.BotClone
         const float NODE_REACH = 1f;               // keep literal by design
 
         float sprintRadius;                        // distance threshold from Init()
+        float sprintEnterDist;          // when to start sprinting (from Init)
+        float sprintExitDist;           // lower than enter → hysteresis
+        float nextSprintToggle;         // debounce sprint toggles
 
-        // — values driven by settings (with literal fallbacks) ---------------
-        // Use properties so there’s no duplicated state: if settings exist, use them; else use literals.
         int   LEDGE_CASTS    => settings?.ledgeCasts    ?? 60;
         float LEDGE_RADIUS   => settings?.ledgeRadius   ?? 1.0f;
         float LEDGE_HEIGHT   => settings?.ledgeHeight   ?? 1.5f;
@@ -59,12 +60,16 @@ namespace Peak.BotClone
         int terrainMask;
         float nextLedgeAttempt;
 
-        // — public entry -----------------------------------------------------
-        internal void Init(Character target, float sprintDist, BotCloneSettings? s = null)
+                internal void Init(Character target, float sprintDist, BotCloneSettings? s = null)
         {
             player = target;
             sprintRadius = sprintDist;
-            settings = s; // if null, properties fall back to literals
+            settings = s;
+
+            // sprint hysteresis: enter at sprintRadius, exit at ~70% of it
+            sprintEnterDist = sprintDist;
+            sprintExitDist  = sprintDist * 0.7f;
+            nextSprintToggle = 0f;
         }
 
         void Awake()
@@ -166,7 +171,24 @@ namespace Peak.BotClone
             {
                 resting = true;
             }
-            else bot.IsSprinting = false;
+        
+            
+            bool sprinting = bot.IsSprinting;
+            float distToPlayer = Vector3.Distance(ch.Center, player.Center);
+            bool canToggle = Time.time >= nextSprintToggle;
+
+            if (resting || Low(STAM_SPRINT_THRESH) || ch.data.isClimbing)
+            {
+                if (sprinting && canToggle) { bot.IsSprinting = false; nextSprintToggle = Time.time + 0.25f; }
+            }
+            else
+            {
+                bool wantSprint = navDir.sqrMagnitude > 1e-4f && distToPlayer >= sprintEnterDist;
+                bool stopSprint = distToPlayer <= sprintExitDist;
+
+                if (!sprinting && wantSprint && canToggle) { bot.IsSprinting = true;  nextSprintToggle = Time.time + 0.25f; }
+                else if (sprinting && stopSprint && canToggle) { bot.IsSprinting = false; nextSprintToggle = Time.time + 0.25f; }
+            }
 
             bot.LookDirection = navDir;
 
