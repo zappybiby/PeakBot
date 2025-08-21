@@ -1,23 +1,21 @@
 // /Runtime/RuntimeNavMesh.cs
+// Build NavMesh at runtime and re-enable agents after bake.
+
 using System.Collections;
+using Unity.AI.Navigation;
 using UnityEngine;
 using UnityEngine.AI;
-using Unity.AI.Navigation;
 
 namespace Peak.BotClone
 {
     public class RuntimeNavMesh : MonoBehaviour
     {
         private NavMeshSurface surface = null!;
-        private bool isBaking = false;
+        private bool isBaking;
 
-        void Awake()
+        private void Awake()
         {
-            surface = gameObject.GetComponent<NavMeshSurface>();
-            if (surface == null)
-            {
-                surface = gameObject.AddComponent<NavMeshSurface>();
-            }
+            surface = GetComponent<NavMeshSurface>() ?? gameObject.AddComponent<NavMeshSurface>();
         }
 
         public IEnumerator BakeNavMesh()
@@ -31,9 +29,11 @@ namespace Peak.BotClone
             Debug.Log("[RuntimeNavMesh] Starting NavMesh bake process...");
             isBaking = true;
 
+            // Configure what to include in the bake.
             surface.collectObjects = CollectObjects.All;
             surface.layerMask = LayerMask.GetMask("Terrain", "Map", "Default");
 
+            // Yield once so scene setup settles this frame.
             yield return null;
 
             Debug.Log("[RuntimeNavMesh] Configuration set. Building NavMesh asynchronously...");
@@ -42,18 +42,17 @@ namespace Peak.BotClone
             NavMesh.AddNavMeshData(navData);
             surface.navMeshData = navData;
 
-            AsyncOperation operation = surface.UpdateNavMesh(surface.navMeshData);
-            while (!operation.isDone)
+            AsyncOperation op = surface.UpdateNavMesh(surface.navMeshData);
+            while (!op.isDone)
             {
-                Debug.Log($"[RuntimeNavMesh] Bake progress: {operation.progress:P0}");
+                Debug.Log($"[RuntimeNavMesh] Bake progress: {op.progress:P0}");
                 yield return null;
             }
 
-            NavMeshTriangulation tris = NavMesh.CalculateTriangulation();
+            var tris = NavMesh.CalculateTriangulation();
             Debug.Log($"[RuntimeNavMesh] Bake complete! New NavMesh has {tris.vertices.Length} vertices.");
 
             ReenableAllAgents();
-
             isBaking = false;
         }
 
@@ -72,6 +71,7 @@ namespace Peak.BotClone
                 {
                     agent.enabled = false;
                     agent.enabled = true;
+
                     if (agent.isOnNavMesh)
                         Debug.Log($"[RuntimeNavMesh] Successfully placed agent '{agent.name}' on NavMesh.");
                     else
