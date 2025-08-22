@@ -26,6 +26,12 @@ namespace Peak.BotClone
         private const float W_SMOOTH = 0.1f;  // heading continuity vs last step
         private const float TIE_NOISE = 0.01f; // small randomness to break ties
 
+        // Heuristics for graph neighbor selection ...
+        private const bool LOG_NAVMESH_FALLBACK = false;           // ← default OFF
+        private const bool LOG_FALLBACK_TRANSITIONS_ONLY = true;   // only log when status changes
+        private const float NAVMESH_FALLBACK_LOG_PERIOD = 5f;      // if not transitions-only, min seconds between logs
+
+
         // State to discourage immediate backtrack and promote smooth motion
         private NavPoint? previousNode;
         private Vector3 lastGraphStep;
@@ -66,19 +72,27 @@ namespace Peak.BotClone
                 if (agent.hasPath && agent.pathStatus == NavMeshPathStatus.PathComplete)
                     return false;
 
-                // Throttled log when status changes or ~1s has passed.
-                if ((Time.time >= _nextFallbackLogAt) ||
-                    (_lastPathStatusForLog != agent.pathStatus) ||
-                    (_lastHasPathForLog != agent.hasPath))
+                // Only log when enabled
+                if (LOG_NAVMESH_FALLBACK)
                 {
-                    Debug.LogWarning($"[GraphFollower] NavMesh pathStatus={agent.pathStatus}, hasPath={agent.hasPath}. Falling back to graph");
-                    _lastPathStatusForLog = agent.pathStatus;
-                    _lastHasPathForLog = agent.hasPath;
-                    _nextFallbackLogAt = Time.time + 1f;
+                    bool statusChanged = (_lastPathStatusForLog != agent.pathStatus) || (_lastHasPathForLog != agent.hasPath);
+                    bool timeOk = Time.time >= _nextFallbackLogAt;
+
+                    if ((LOG_FALLBACK_TRANSITIONS_ONLY && statusChanged) ||
+                        (!LOG_FALLBACK_TRANSITIONS_ONLY && (statusChanged || timeOk)))
+                    {
+        #if UNITY_EDITOR
+                        Debug.LogWarning($"[GraphFollower] NavMesh pathStatus={agent.pathStatus}, hasPath={agent.hasPath}. Falling back to graph");
+        #endif
+                        _lastPathStatusForLog = agent.pathStatus;
+                        _lastHasPathForLog = agent.hasPath;
+                        _nextFallbackLogAt = Time.time + NAVMESH_FALLBACK_LOG_PERIOD;
+                    }
                 }
             }
             return true;
         }
+
 
         // ---------------------------------------------------------------------
         // Graph steering (fallback when NavMesh path isn't complete)

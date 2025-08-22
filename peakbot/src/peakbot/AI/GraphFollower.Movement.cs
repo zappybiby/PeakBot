@@ -1,7 +1,8 @@
 // /AI/GraphFollower.Movement.cs
 // -----------------------------------------------------------------------------
 // Movement/interaction logic for GraphFollower: wall-attach jump, small-step
-// climbs/hops, ledge-gap detection, and input translation.
+// climbs/hops with hop cooldown and escalation, ledge-gap detection,
+// and input translation.
 // -----------------------------------------------------------------------------
 
 using System.Collections;
@@ -14,6 +15,16 @@ namespace Peak.BotClone
 {
     internal partial class GraphFollower
     {
+        // Tunables for step detection; consider promoting to BotCloneSettings if you want them adjustable.
+        private const float STEP_RAY_DIST   = 1.6f;
+        private const float STEP_MIN_CLIMB  = 0.30f;  // start TryClimb above ~30 cm
+        private const float STEP_MAX_CLIMB  = 1.40f;  // above this treat as wall/attach territory
+        private const float STEP_SPHERE_RAD = 0.20f;
+
+        // Hop anti-spam & escalation.
+        private float nextHopOkAt;
+        private int consecutiveHops;
+
         /// <summary>
         /// Orchestrates movement decisions for the bot, including wall-attach
         /// jumps, small obstacle climbs/hops, ledge-gap jumps, and converting a
@@ -30,15 +41,17 @@ namespace Peak.BotClone
             if (staminaOK && !RecentlyExhausted() && ch.data.isGrounded && !ch.data.isClimbing &&
                 Time.time >= nextWallAttempt && Regular() >= STAM_ATTACH_ABS)
             {
-                const float wallProbeDist = 1.6f;
+                // Use horizontal forward; loosen thresholds a bit for sloped faces.
+                Vector3 fwd = Vector3.ProjectOnPlane(moveDir, Vector3.up).normalized;
+                const float wallProbeDist   = 2.2f;
                 const float maxAttachHeight = 12.0f;
-                const float minHeightDiff = 1.2f;
+                const float minHeightDiff   = 0.60f;   // was 1.2f
 
-                if (Physics.Raycast(ch.Head, moveDir, out RaycastHit hit, wallProbeDist, terrainMask))
+                if (fwd.sqrMagnitude > 1e-4f && Physics.Raycast(ch.Head, fwd, out RaycastHit hit, wallProbeDist, terrainMask))
                 {
                     float heightDiff = hit.point.y - ch.Center.y;
                     bool tallEnough = heightDiff > minHeightDiff && heightDiff < maxAttachHeight;
-                    bool steepWall = Vector3.Dot(hit.normal, moveDir) < -0.7f;
+                    bool steepWall = Vector3.Dot(hit.normal, fwd) < -0.5f; // was -0.7f
 
                     if (tallEnough && steepWall)
                     {
@@ -68,11 +81,11 @@ namespace Peak.BotClone
                                 Debug.Log($"[WallAttach] nextWallAttempt set to {nextWallAttempt:F2}, attachFailDelay was {attachFailDelay:F2}");
 
                                 attachFailDelay = Mathf.Min(attachFailDelay * 2f, 4f); // exponential back-off
+                                consecutiveHops = 0; // reset escalation
                             }
                             else
                             {
                                 // Path around instead; retry after 1 s.
-                                Debug.Log("[WallAttach] not worth climb; path around instead");
                                 nextWallAttempt = Time.time + 1f;
                             }
                         }
@@ -80,25 +93,55 @@ namespace Peak.BotClone
                 }
             }
 
-            // ── 2) Face-block small step / simple climb ───────────────────
+            // ── 2) Face-block small/medium step handling ──────────────────
             if (staminaOK && !ch.data.isClimbing && !RecentlyExhausted())
             {
+                // Horizontal forward from chest, spherecast for robustness on uneven slopes
+                Vector3 fwd = Vector3.ProjectOnPlane(moveDir, Vector3.up).normalized;
+                Vector3 chest = ch.Center + Vector3.up * 0.6f;
                 Debug.Log($"[StepClimb] Checking for small obstacle; climbing={ch.data.isClimbing}");
 
-                if (Physics.Raycast(ch.Head, moveDir, out RaycastHit hit, 1.5f, terrainMask))
+                if (fwd.sqrMagnitude > 1e-4f &&
+                    Physics.SphereCast(chest, STEP_SPHERE_RAD, fwd, out RaycastHit hit, STEP_RAY_DIST, terrainMask))
                 {
-                    float heightDiff = hit.point.y - ch.Center.y;
-                    Debug.Log($"[StepClimb] hit obstacle at {hit.point}, heightDiff={heightDiff:F2}");
+                    // Estimate feet height: center minus approximate half-height.
+                    // If your Character exposes feet/height, use that instead.
+                    float feetY = ch.Center.y - 0.9f; // conservative default; adjust if you have a real value
+                    float step = hit.point.y - feetY;
+                    Debug.Log($"[StepClimb] hit obstacle at {hit.point}, step={step:F2}");
 
-                    if (heightDiff > 1.2f)
+                    if (step >= STEP_MIN_CLIMB && step <= STEP_MAX_CLIMB)
                     {
-                        Debug.Log("[HandleMovement] ▶ Invoke climb");
+                        Debug.Log("[HandleMovement] ▶ TryClimb (medium step)");
                         MI_TryClimb?.Invoke(ch.refs.climbing, null);
+                        ch.input.jumpWasPressed = false; // avoid hop spam
+                        consecutiveHops = 0;
                     }
-                    else
+                    else if (step < STEP_MIN_CLIMB)
                     {
-                        Debug.Log("[HandleMovement] ▶ Small hop");
-                        ch.input.jumpWasPressed = true; // small hop
+                        if (Time.time >= nextHopOkAt)
+                        {
+                            Debug.Log("[HandleMovement] ▶ Small hop");
+                            ch.input.jumpWasPressed = true;
+                            nextHopOkAt = Time.time + 0.25f;
+                            if (++consecutiveHops >= 3)
+                            {
+                                Debug.Log("[HandleMovement] ▶ Escalate after hop spam → TryClimb");
+                                MI_TryClimb?.Invoke(ch.refs.climbing, null);
+                                consecutiveHops = 0;
+                            }
+                        }
+                        else
+                        {
+                            ch.input.jumpWasPressed = false;
+                        }
+                    }
+                    else // step > STEP_MAX_CLIMB → treat as wall/attach territory
+                    {
+                        Debug.Log("[HandleMovement] ▶ Big step → prefer wall attach next");
+                        ch.input.jumpWasPressed = false;
+                        nextWallAttempt = Mathf.Min(nextWallAttempt, Time.time); // allow immediate wall attempt block to run
+                        // don't change hop counter here
                     }
                 }
                 else
@@ -127,6 +170,7 @@ namespace Peak.BotClone
                             ch.refs.view.RPC("JumpRpc", RpcTarget.All, false);
 
                         nextLedgeAttempt = Time.time + 0.5f;
+                        consecutiveHops = 0;
                     }
                 }
             }
@@ -194,6 +238,7 @@ namespace Peak.BotClone
             yield return new WaitForSeconds(0.15f);
 
             MI_TryClimb?.Invoke(ch.refs.climbing, null);
+            consecutiveHops = 0;
         }
     }
 }
