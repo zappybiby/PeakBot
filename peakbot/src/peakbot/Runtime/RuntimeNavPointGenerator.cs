@@ -1,5 +1,6 @@
 // /Runtime/RuntimeNavPointGenerator.cs
 // Runtime generation of a lightweight NavPoint graph from scene geometry/NavMesh.
+// Supports optional world-space AABB bounds to limit sampling to a local corridor.
 
 using System.Collections;
 using System.Collections.Generic;
@@ -14,12 +15,16 @@ namespace Peak.BotClone
         private const float NODE_SPACING = 15f;
         private const int POINTS_TO_PROCESS_PER_FRAME = 50;
         private const float MAX_CONNECTION_SEARCH_RADIUS = NODE_SPACING * 4f;
+
         private static readonly Collider[] overlapResults = new Collider[256];
 
         private const int NAVPOINT_LAYER = 30;
         private static readonly int navPointLayerMask = 1 << NAVPOINT_LAYER;
 
-        public static IEnumerator GenerateAsync()
+        /// <summary>
+        /// Generate NavPoints. When 'forcedBounds' is provided, sampling is restricted to that AABB.
+        /// </summary>
+        public static IEnumerator GenerateAsync(Bounds? forcedBounds = null)
         {
             // Let the scene finish spawning before sampling.
             yield return null; yield return null; yield return null;
@@ -41,22 +46,34 @@ namespace Peak.BotClone
             sphere.radius = 0.5f;
             prefab.SetActive(false);
 
-            // Collect scene colliders on geometry layers we'll raycast against.
-            int geometryMask = LayerMask.GetMask("Terrain", "Map", "Default");
-            var cols = Object.FindObjectsOfType<Collider>()
-                              .Where(c => (geometryMask & (1 << c.gameObject.layer)) != 0)
-                              .ToList();
-            if (cols.Count == 0)
+            // Determine sampling bounds
+            Bounds useBounds;
+            if (forcedBounds.HasValue)
             {
-                Debug.LogError("[RuntimeNavPointGenerator] No geometry colliders found. Aborting.");
-                Object.Destroy(prefab);
-                yield break;
+                useBounds = forcedBounds.Value;
+                Debug.Log($"[RuntimeNavPointGenerator] Using forced bounds center={useBounds.center} size={useBounds.size}");
+            }
+            else
+            {
+                // Collect scene colliders on geometry layers we'll raycast against.
+                int geometryMask = LayerMask.GetMask("Terrain", "Map", "Default");
+                var cols = Object.FindObjectsOfType<Collider>()
+                                  .Where(c => (geometryMask & (1 << c.gameObject.layer)) != 0)
+                                  .ToList();
+                if (cols.Count == 0)
+                {
+                    Debug.LogError("[RuntimeNavPointGenerator] No geometry colliders found. Aborting.");
+                    Object.Destroy(prefab);
+                    yield break;
+                }
+
+                // Expand bounds to cover all geometry
+                useBounds = cols[0].bounds;
+                for (int i = 1; i < cols.Count; i++) useBounds.Encapsulate(cols[i].bounds);
             }
 
-            // Sampling bounds + vertical ray distance for NavMesh.SamplePosition.
-            var bounds = cols[0].bounds;
-            for (int i = 1; i < cols.Count; i++) bounds.Encapsulate(cols[i].bounds);
-            Vector3 min = bounds.min, max = bounds.max;
+            Vector3 min = useBounds.min;
+            Vector3 max = useBounds.max;
             float sampleDistance = (max.y - min.y) + 10f; // generous headroom
             Debug.Log($"[RuntimeNavPointGenerator] Sampling bounds min={min}, max={max}, sampleDistance={sampleDistance}");
 
@@ -65,7 +82,7 @@ namespace Peak.BotClone
             managerGO.AddComponent<NavPoints>();
             var allPoints = new List<NavPoint>();
 
-            // Grid-sample the NavMesh.
+            // Grid-sample the NavMesh within useBounds.
             Debug.Log("[RuntimeNavPointGenerator] Sampling NavMesh for point placement...");
             for (float x = min.x; x <= max.x; x += NODE_SPACING)
             {
@@ -74,6 +91,8 @@ namespace Peak.BotClone
                     Vector3 origin = new(x, max.y + 5f, z);
                     if (NavMesh.SamplePosition(origin, out NavMeshHit hit, sampleDistance, NavMesh.AllAreas))
                     {
+                        if (!useBounds.Contains(hit.position)) continue;
+
                         var go = Object.Instantiate(prefab);
                         go.transform.position = hit.position;
                         go.name = "Runtime NavPoint";
@@ -81,7 +100,8 @@ namespace Peak.BotClone
                         allPoints.Add(go.GetComponent<NavPoint>());
                     }
                 }
-                yield return null;
+                if (allPoints.Count % POINTS_TO_PROCESS_PER_FRAME == 0)
+                    yield return null;
             }
 
             // Fallback: NavMesh triangulation if grid produced nothing.
@@ -90,17 +110,29 @@ namespace Peak.BotClone
                 Debug.LogWarning("[RuntimeNavPointGenerator] No grid hits; falling back to triangulation...");
                 var tris = NavMesh.CalculateTriangulation();
                 var seen = new HashSet<Vector2Int>();
-                foreach (var v in tris.vertices)
+                int added = 0;
+
+                for (int i = 0; i < tris.vertices.Length; i++)
                 {
+                    var v = tris.vertices[i];
+
+                    if (forcedBounds.HasValue && !useBounds.Contains(v))
+                        continue;
+
                     var cell = new Vector2Int(Mathf.FloorToInt(v.x / NODE_SPACING), Mathf.FloorToInt(v.z / NODE_SPACING));
                     if (!seen.Add(cell)) continue;
+
                     var go = Object.Instantiate(prefab);
                     go.transform.position = v;
                     go.name = "Runtime NavPoint";
                     go.transform.SetParent(managerGO.transform, true);
                     allPoints.Add(go.GetComponent<NavPoint>());
+                    added++;
+
+                    if (added % POINTS_TO_PROCESS_PER_FRAME == 0)
+                        yield return null;
                 }
-                Debug.Log($"[RuntimeNavPointGenerator] Fallback created {allPoints.Count} points.");
+                Debug.Log($"[RuntimeNavPointGenerator] Triangulation fallback created {added} points.");
             }
 
             if (allPoints.Count == 0)
@@ -136,6 +168,13 @@ namespace Peak.BotClone
                     {
                         var n = overlapResults[k].GetComponent<NavPoint>();
                         if (n == null || n == current) continue;
+
+                        // Keep within the forced bounds if provided.
+                        if (forcedBounds.HasValue)
+                        {
+                            if (!useBounds.Contains(n.transform.position)) continue;
+                        }
+
                         if (!Physics.Linecast(current.transform.position + verticalOffset,
                                               n.transform.position + verticalOffset,
                                               obstacleMask))

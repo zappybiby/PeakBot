@@ -1,5 +1,5 @@
 // /Runtime/RuntimeNavMesh.cs
-// Build NavMesh at runtime and re-enable agents after bake.
+// Build NavMesh at runtime, optionally bounded to an AABB, and re-enable agents after bake.
 
 using System.Collections;
 using Unity.AI.Navigation;
@@ -12,13 +12,31 @@ namespace Peak.BotClone
     {
         private NavMeshSurface surface = null!;
         private bool isBaking;
+        // Store the handle (NavMeshDataInstance) returned by AddNavMeshData,
+        // so we can remove it later without type mismatches.
+        private NavMeshDataInstance lastNavData; // default = invalid
 
         private void Awake()
         {
             surface = GetComponent<NavMeshSurface>() ?? gameObject.AddComponent<NavMeshSurface>();
         }
 
-        public IEnumerator BakeNavMesh()
+        private void OnDestroy()
+        {
+            if (lastNavData.valid)
+            {
+                NavMesh.RemoveNavMeshData(lastNavData);
+                lastNavData = default;
+            }
+        }
+
+        // Backwards-compatible full bake
+        public IEnumerator BakeNavMesh() => BakeNavMesh(null);
+
+        /// <summary>
+        /// Bake the NavMesh. When 'volume' is provided, bake is limited to that world-space AABB.
+        /// </summary>
+        public IEnumerator BakeNavMesh(Bounds? volume)
         {
             if (isBaking)
             {
@@ -26,36 +44,87 @@ namespace Peak.BotClone
                 yield break;
             }
 
-            Debug.Log("[RuntimeNavMesh] Starting NavMesh bake process...");
             isBaking = true;
 
-            // Configure what to include in the bake.
-            surface.collectObjects = CollectObjects.All;
-            surface.layerMask = LayerMask.GetMask("Terrain", "Map", "Default");
+            // Configure surface
+            SetupSurfaceForBounds(volume);
 
-            // Yield once so scene setup settles this frame.
+            // Yield once so scene/setup can settle this frame.
             yield return null;
 
-            Debug.Log("[RuntimeNavMesh] Configuration set. Building NavMesh asynchronously...");
+            // Replace previous data to avoid accumulating NavMeshData objects
+            if (lastNavData.valid)
+            {
+                NavMesh.RemoveNavMeshData(lastNavData);
+                lastNavData = default;
+            }
 
             var navData = new NavMeshData();
-            NavMesh.AddNavMeshData(navData);
-            surface.navMeshData = navData;
+            surface.navMeshData = navData;                   // Surface needs the data object
+            lastNavData = NavMesh.AddNavMeshData(navData);   // Keep the handle so we can remove it
 
-            AsyncOperation op = surface.UpdateNavMesh(surface.navMeshData);
+            var op = surface.UpdateNavMesh(surface.navMeshData);
             while (!op.isDone)
             {
-                Debug.Log($"[RuntimeNavMesh] Bake progress: {op.progress:P0}");
+                // Optional: log progress if you like (can be noisy)
+                // Debug.Log($"[RuntimeNavMesh] Bake progress: {op.progress:P0}");
                 yield return null;
             }
 
             var tris = NavMesh.CalculateTriangulation();
-            Debug.Log($"[RuntimeNavMesh] Bake complete! New NavMesh has {tris.vertices.Length} vertices.");
+            Debug.Log(volume.HasValue
+                ? $"[RuntimeNavMesh] Bounded bake complete. Vertices={tris.vertices.Length} center={volume.Value.center} size={volume.Value.size}"
+                : $"[RuntimeNavMesh] Full bake complete. Vertices={tris.vertices.Length}");
 
             ReenableAllAgents();
             isBaking = false;
         }
 
+        /// <summary>
+        /// Configure the NavMeshSurface to either bake the whole scene or a volume.
+        /// NOTE: assumes the surface transform has no rotation or non-uniform scale.
+        /// If it does, size conversion uses a best-effort lossyScale division.
+        /// </summary>
+        private void SetupSurfaceForBounds(Bounds? volume)
+        {
+            // Include typical geometry layers
+            surface.layerMask = LayerMask.GetMask("Terrain", "Map", "Default");
+
+            if (volume.HasValue)
+            {
+                surface.collectObjects = CollectObjects.Volume;
+
+                // Convert world AABB center/size into the surface's local space.
+                // center: exact via InverseTransformPoint
+                Vector3 localCenter = surface.transform.InverseTransformPoint(volume.Value.center);
+
+                // size: approximate by dividing by lossyScale magnitudes (handles uniform scale correctly).
+                Vector3 ls = surface.transform.lossyScale;
+                Vector3 safeScale = new Vector3(
+                    Mathf.Approximately(ls.x, 0f) ? 1f : Mathf.Abs(ls.x),
+                    Mathf.Approximately(ls.y, 0f) ? 1f : Mathf.Abs(ls.y),
+                    Mathf.Approximately(ls.z, 0f) ? 1f : Mathf.Abs(ls.z)
+                );
+                Vector3 localSize = new Vector3(
+                    volume.Value.size.x / safeScale.x,
+                    volume.Value.size.y / safeScale.y,
+                    volume.Value.size.z / safeScale.z
+                );
+
+                surface.center = localCenter;
+                surface.size   = localSize;
+
+                Debug.Log($"[RuntimeNavMesh] Using bounded bake: localCenter={localCenter} localSize={localSize}");
+            }
+            else
+            {
+                surface.collectObjects = CollectObjects.All;
+            }
+        }
+
+        /// <summary>
+        /// Re-enable any NavMeshAgents that might not be on the mesh after (re)bake.
+        /// </summary>
         public void ReenableAllAgents()
         {
             Debug.Log("[RuntimeNavMesh] Re-enabling all NavMeshAgents.");
@@ -67,15 +136,16 @@ namespace Peak.BotClone
 #endif
             foreach (var agent in allAgents)
             {
-                if (agent.gameObject.activeInHierarchy && !agent.isOnNavMesh)
+                if (!agent || !agent.gameObject.activeInHierarchy) continue;
+
+                // If an agent lost its mesh link, briefly toggle it to snap back.
+                if (!agent.isOnNavMesh)
                 {
                     agent.enabled = false;
                     agent.enabled = true;
 
-                    if (agent.isOnNavMesh)
-                        Debug.Log($"[RuntimeNavMesh] Successfully placed agent '{agent.name}' on NavMesh.");
-                    else
-                        Debug.LogWarning($"[RuntimeNavMesh] Failed to place agent '{agent.name}' on NavMesh after bake.");
+                    if (!agent.isOnNavMesh)
+                        Debug.LogWarning($"[RuntimeNavMesh] Agent '{agent.name}' is still not on NavMesh after toggle.");
                 }
             }
         }

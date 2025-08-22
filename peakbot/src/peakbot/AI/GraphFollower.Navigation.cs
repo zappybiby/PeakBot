@@ -27,7 +27,7 @@ namespace Peak.BotClone
         private const float TIE_NOISE = 0.01f; // small randomness to break ties
 
         // Heuristics for graph neighbor selection ...
-        private const bool LOG_NAVMESH_FALLBACK = false;           // ← default OFF
+        private static readonly bool LOG_NAVMESH_FALLBACK = false;          // ← default OFF
         private const bool LOG_FALLBACK_TRANSITIONS_ONLY = true;   // only log when status changes
         private const float NAVMESH_FALLBACK_LOG_PERIOD = 5f;      // if not transitions-only, min seconds between logs
 

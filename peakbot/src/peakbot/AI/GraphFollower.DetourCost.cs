@@ -20,9 +20,13 @@ namespace Peak.BotClone
         {
             if (allNodes.Count == 0) return Mathf.Infinity;
 
-            NavPoint start = NearestNode(from);
-            NavPoint goal = NearestNode(to);
+            NavPoint? start = NearestNode(from);
+            NavPoint? goal  = NearestNode(to);
             if (start == null || goal == null) return Mathf.Infinity;
+
+            // Non-null locals for the algorithm below
+            var s = start!;
+            var g = goal!;
 
             // A* open set with (f, g, node)
             var open = new MinHeap<OpenItem>((a, b) =>
@@ -33,14 +37,14 @@ namespace Peak.BotClone
 
             var gCost = new Dictionary<NavPoint, float>(64)
             {
-                [start] = 0f
+                [s] = 0f
             };
 
             open.Push(new OpenItem
             {
-                node = start,
+                node = s,
                 g = 0f,
-                f = Heuristic(start, goal)
+                f = Heuristic(s, g)
             });
 
             int expansions = 0;
@@ -50,7 +54,7 @@ namespace Peak.BotClone
                 var n = cur.node;
                 expansions++;
 
-                if (n == goal)
+                if (n == g)
                     return gCost[n] + Vector3.Distance(n.transform.position, to);
 
                 foreach (var c in n.connections)
@@ -59,7 +63,7 @@ namespace Peak.BotClone
                     if (!gCost.TryGetValue(c, out float oldG) || tentativeG < oldG)
                     {
                         gCost[c] = tentativeG;
-                        float f = tentativeG + Heuristic(c, goal);
+                        float f = tentativeG + Heuristic(c, g);
                         open.Push(new OpenItem { node = c, g = tentativeG, f = f });
                     }
                 }
@@ -74,9 +78,9 @@ namespace Peak.BotClone
         /// <summary>
         /// Returns the nearest NavPoint to the given world position.
         /// </summary>
-        private NavPoint NearestNode(Vector3 pos)
+        private NavPoint? NearestNode(Vector3 pos)
         {
-            NavPoint best = null;
+            NavPoint? best = null;
             float bestD = float.MaxValue;
 
             foreach (var n in allNodes)
