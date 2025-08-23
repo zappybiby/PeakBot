@@ -21,12 +21,33 @@ namespace Peak.BotClone
     internal partial class GraphFollower : MonoBehaviour
     {
         // ---------------------------------------------------------------------
+        // Runtime logging (no editor defines)
+        // ---------------------------------------------------------------------
+        // Flip to true if you want verbose logs in release/runtime builds.
+        private const bool VERBOSE_LOGS = false;
+
+        // ---------------------------------------------------------------------
         // References (assigned in Awake/Init)
         // ---------------------------------------------------------------------
         private Character player = null!;
         private Bot bot = null!;
         private Character ch = null!;
+        private CharacterData data = null!;
         private BotCloneSettings? settings; // Optional; when null we use literals below.
+
+        // ---------------------------------------------------------------------
+        // Body-size awareness (computed from CharacterData + colliders)
+        // ---------------------------------------------------------------------
+        private float bodyHeight = 1.8f;   // meters
+        private float bodyRadius = 0.30f;  // meters
+        private float feetY, headY, chestY;
+
+        [SerializeField, Range(0.45f, 0.70f)] private float chestHeightFrac = 0.60f;
+
+        // Convenience accessors (used by Movement/other partials)
+        private Vector3 FeetPos  => new Vector3(ch.Center.x, feetY,  ch.Center.z);
+        private Vector3 HeadPos  => new Vector3(ch.Center.x, headY,  ch.Center.z);
+        private Vector3 ChestPos => new Vector3(ch.Center.x, chestY, ch.Center.z);
 
         // ---------------------------------------------------------------------
         // NavPoint graph
@@ -40,24 +61,22 @@ namespace Peak.BotClone
         private float sprintExitDist; // Lower than enter → hysteresis.
         private float nextSprintToggle; // Debounce sprint toggles.
 
-        private int LEDGE_CASTS => settings?.ledgeCasts ?? 60;
-        private float LEDGE_RADIUS => settings?.ledgeRadius ?? 1.0f;
-        private float LEDGE_HEIGHT => settings?.ledgeHeight ?? 1.5f;
-        private float LEDGE_MAX_DIST => settings?.ledgeMaxDist ?? 4f;
+        private int   LEDGE_CASTS   => settings?.ledgeCasts   ?? 60;
+        private float LEDGE_RADIUS  => settings?.ledgeRadius  ?? 1.0f;
+        private float LEDGE_HEIGHT  => settings?.ledgeHeight  ?? 1.5f;
+        private float LEDGE_MAX_DIST=> settings?.ledgeMaxDist ?? 4f;
 
-        private float DESPAWN_DIST => settings?.despawnDistance ?? 100f;
+        private float DESPAWN_DIST  => settings?.despawnDistance ?? 100f;
 
         // Threshold semantics (regular-only mindset):
-        // - FRACTION fields are fractions of the regular bar (0..1, affected by afflictions).
-        // - ABS fields are absolute regular units (0..RegularMax()).
-        private float STAM_REST_FRAC => settings?.stamRest ?? 0.30f;  // Begin resting at/under this regular fraction.
-        private float STAM_SPRINT_FRAC => settings?.stamSprint ?? 0.25f; // Need this regular fraction to sprint.
-        private float STAM_CLIMB_FRAC => settings?.stamClimb ?? 0.20f; // Need this regular fraction for simple climbs/jumps.
-        private float STAM_ATTACH_ABS => settings?.stamAttach ?? 0.40f; // Absolute regular units required to attempt wall-attach jump.
+        private float STAM_REST_FRAC   => settings?.stamRest   ?? 0.30f;
+        private float STAM_SPRINT_FRAC => settings?.stamSprint ?? 0.25f;
+        private float STAM_CLIMB_FRAC  => settings?.stamClimb  ?? 0.20f;
+        private float STAM_ATTACH_ABS  => settings?.stamAttach ?? 0.40f;
 
-        private int MAX_NAV_EVAL_NODES => settings?.maxNavEvalNodes ?? 200;
-        private float DETOUR_FACTOR => settings?.detourFactor ?? 1.4f;
-        private float MAX_WALL_HANG => settings?.maxWallHang ?? 3f;
+        private int   MAX_NAV_EVAL_NODES => settings?.maxNavEvalNodes ?? 200;
+        private float DETOUR_FACTOR       => settings?.detourFactor    ?? 1.4f;
+        private float MAX_WALL_HANG       => settings?.maxWallHang     ?? 3f;
 
         // ---------------------------------------------------------------------
         // Runtime state
@@ -87,14 +106,18 @@ namespace Peak.BotClone
 
             // Sprint hysteresis: enter at sprintRadius, exit at ~70% of it.
             sprintEnterDist = sprintDist;
-            sprintExitDist = sprintDist * 0.7f;
+            sprintExitDist  = sprintDist * 0.7f;
             nextSprintToggle = 0f;
         }
 
         private void Awake()
         {
             bot = GetComponentInChildren<Bot>();
-            ch = GetComponent<Character>();
+            ch  = GetComponent<Character>();
+            data = ch != null ? ch.data : GetComponent<CharacterData>();
+
+            // Initial body-size compute (so other partials can read immediately).
+            RecalcBodyDims();
 
             // Populate graph nodes (RuntimeNavPointGenerator should have created them).
             FindAndConnectNavPoints();
@@ -116,18 +139,18 @@ namespace Peak.BotClone
                 if (nodes.Length > 0)
                 {
                     allNodes.AddRange(nodes);
-                    Debug.Log($"[Clone] NavPoints successfully initialized from manager: {allNodes.Count}");
+                    if (VERBOSE_LOGS) Debug.Log($"[Clone] NavPoints initialized from manager: {allNodes.Count}");
                     return;
                 }
             }
 
             // Fallback: scan the scene.
-            Debug.LogWarning("[Clone] NavPoints.instance was not found. Using scene search fallback.");
+            if (VERBOSE_LOGS) Debug.LogWarning("[Clone] NavPoints.instance not found. Using scene search fallback.");
             NavPoint[] fallbackNodes = GetAllNavPoints();
             if (fallbackNodes.Length > 0)
             {
                 allNodes.AddRange(fallbackNodes);
-                Debug.Log($"[Clone] NavPoints initialized via fallback: {fallbackNodes.Length}");
+                if (VERBOSE_LOGS) Debug.Log($"[Clone] NavPoints initialized via fallback: {fallbackNodes.Length}");
             }
             else
             {
@@ -137,11 +160,8 @@ namespace Peak.BotClone
 
         private static NavPoint[] GetAllNavPoints()
         {
-#if UNITY_2023_1_OR_NEWER
-            return Object.FindObjectsByType<NavPoint>(FindObjectsSortMode.None);
-#else
+            // Runtime-safe: avoid compile-time UNITY_20xx conditionals.
             return Object.FindObjectsOfType<NavPoint>(true);
-#endif
         }
 
         // ---------------------------------------------------------------------
@@ -151,18 +171,21 @@ namespace Peak.BotClone
         {
             // Safety / despawn
             if (!player || !bot || !ch) return;
+
+            // Keep body metrics in sync with posture/crouch/grounding.
+            RecalcBodyDims();
+
             if (Vector3.Distance(ch.Center, player.Center) >= DESPAWN_DIST)
             {
                 if (PhotonNetwork.InRoom)
                     PhotonNetwork.Destroy(gameObject);
                 else
                     Destroy(gameObject);
-
                 return;
             }
 
             // Force drop if hanging too long or low regular stamina.
-            if (ch.data.isClimbing && (RegularFrac() < STAM_CLIMB_FRAC || ch.data.sinceClimb > HangCap()))
+            if (data.isClimbing && (RegularFrac() < STAM_CLIMB_FRAC || data.sinceClimb > HangCap()))
                 ch.refs.climbing.StopClimbing();
 
             // 1) NavMesh steering (primary)
@@ -177,7 +200,7 @@ namespace Peak.BotClone
                 navDir = (player.Center - ch.Center).normalized;
 
             // Face movement direction.
-            ch.data.lookValues = DirToLook(navDir);
+            data.lookValues = DirToLook(navDir);
 
             // Handle movement, climbing, gaps, etc.
             HandleMovement(navDir);
@@ -188,7 +211,6 @@ namespace Peak.BotClone
             // Stamina State Machine (regular-only).
             if (resting)
             {
-                // Leave rest with small hysteresis once we’re healthy again.
                 if (RegularFrac() >= (STAM_REST_FRAC + 0.10f))
                     resting = false;
             }
@@ -198,16 +220,16 @@ namespace Peak.BotClone
             }
 
             // Sprint gating: only when not resting, not climbing, and regular bar healthy enough.
-            bool sprinting = bot.IsSprinting;
-            float distToPlayer = Vector3.Distance(ch.Center, player.Center);
-            bool canToggle = Time.time >= nextSprintToggle;
-            bool lowRegular = RegularFrac() < STAM_SPRINT_FRAC;
+            bool  sprinting     = bot.IsSprinting;
+            float distToPlayer  = Vector3.Distance(ch.Center, player.Center);
+            bool  canToggle     = Time.time >= nextSprintToggle;
+            bool  lowRegular    = RegularFrac() < STAM_SPRINT_FRAC;
 
-            if (resting || lowRegular || ch.data.isClimbing)
+            if (resting || lowRegular || data.isClimbing)
             {
                 if (sprinting && canToggle)
                 {
-                    bot.IsSprinting = false;
+                    bot.IsSprinting  = false;
                     nextSprintToggle = Time.time + 0.25f;
                 }
             }
@@ -218,12 +240,12 @@ namespace Peak.BotClone
 
                 if (!sprinting && wantSprint && canToggle)
                 {
-                    bot.IsSprinting = true;
+                    bot.IsSprinting  = true;
                     nextSprintToggle = Time.time + 0.25f;
                 }
                 else if (sprinting && stopSprint && canToggle)
                 {
-                    bot.IsSprinting = false;
+                    bot.IsSprinting  = false;
                     nextSprintToggle = Time.time + 0.25f;
                 }
             }
@@ -238,25 +260,23 @@ namespace Peak.BotClone
 
             lastPos = ch.Center;
 
-            if (stuckTime > 1.5f && !ch.data.isClimbing && RegularFrac() >= STAM_CLIMB_FRAC && !RecentlyExhausted())
+            if (stuckTime > 1.5f && !data.isClimbing && RegularFrac() >= STAM_CLIMB_FRAC && !RecentlyExhausted())
             {
-                Debug.LogWarning($"[AI] I've been stuck here for {stuckTime:F1}s. I am one with this fucking wall.");
+                if (VERBOSE_LOGS) Debug.LogWarning($"[AI] Stuck for {stuckTime:F1}s. Nudging a climb.");
                 // Poke a climb in case we're blocked by a knee-high ledge.
                 MI_TryClimb?.Invoke(ch.refs.climbing, null);
-                current = null; // Reset NavPoint path.
+                current   = null; // Reset NavPoint path.
                 stuckTime = 0f;
             }
 
             // Regen correctness while resting.
             if (resting)
             {
-                // Stop consuming.
                 bot.IsSprinting = false;
                 ch.input.movementInput = Vector2.zero;
 
-                if (ch.data.currentClimbHandle == null && ch.data.isClimbing)
+                if (data.currentClimbHandle == null && data.isClimbing)
                     ch.refs.climbing.StopClimbing();
-                // Else: when on a handle, keep inputs quiet to avoid canceling hang (regen allowed anywhere).
             }
         }
 
@@ -266,8 +286,53 @@ namespace Peak.BotClone
         private float HangCap()
         {
             // staminaMod ∈ [0.2, 1]; lower when empty.
-            float mod01 = Mathf.InverseLerp(0.2f, 1f, ch.data.staminaMod);
+            float mod01 = Mathf.InverseLerp(0.2f, 1f, data.staminaMod);
             return Mathf.Lerp(1.5f, MAX_WALL_HANG, mod01);
+        }
+
+        // ---------------------------------------------------------------------
+        // Body metrics recompute (runtime-safe)
+        // ---------------------------------------------------------------------
+        private void RecalcBodyDims()
+        {
+            // --- Vertical from CharacterData (authoritative for posture/crouch) ---
+            float headH = (data != null && data.currentHeadHeight > 0f) ? data.currentHeadHeight
+                         : (data != null && data.targetHeadHeight  > 0f) ? data.targetHeadHeight
+                         : 1.8f;
+
+            float hipH  = (data != null && data.targetHipHeight > 0f) ? data.targetHipHeight : headH * 0.5f;
+
+            bodyHeight = Mathf.Clamp(headH, 1.0f, 2.6f);
+
+            if (data != null && data.isGrounded)
+                feetY = data.groundPos.y;
+            else
+                feetY = ch.Center.y - hipH;
+
+            headY = feetY + bodyHeight;
+
+            float chestFrac = chestHeightFrac;
+            if (data != null && data.isCrouching)
+                chestFrac = Mathf.Clamp(chestFrac - 0.06f, 0.45f, 0.70f);
+
+            chestY = Mathf.Lerp(feetY, headY, chestFrac);
+
+            // --- Horizontal radius from CharacterController/CapsuleCollider ---
+            float r = 0.30f;
+
+            var cc = GetComponent<CharacterController>();
+            if (cc != null)
+            {
+                r = Mathf.Max(cc.radius, cc.bounds.extents.x, cc.bounds.extents.z);
+            }
+            else
+            {
+                var cap = GetComponentInChildren<CapsuleCollider>();
+                if (cap != null)
+                    r = Mathf.Max(cap.radius, cap.bounds.extents.x, cap.bounds.extents.z);
+            }
+
+            bodyRadius = Mathf.Clamp(r, 0.10f, 0.60f);
         }
     }
 }

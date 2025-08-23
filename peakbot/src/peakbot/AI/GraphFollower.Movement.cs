@@ -15,12 +15,6 @@ namespace Peak.BotClone
 {
     internal partial class GraphFollower
     {
-        // Tunables for step detection; consider promoting to BotCloneSettings if you want them adjustable.
-        private const float STEP_RAY_DIST   = 1.6f;
-        private const float STEP_MIN_CLIMB  = 0.30f;  // start TryClimb above ~30 cm
-        private const float STEP_MAX_CLIMB  = 1.40f;  // above this treat as wall/attach territory
-        private const float STEP_SPHERE_RAD = 0.20f;
-
         // Hop anti-spam & escalation.
         private float nextHopOkAt;
         private int consecutiveHops;
@@ -32,60 +26,57 @@ namespace Peak.BotClone
         /// </summary>
         private void HandleMovement(Vector3 moveDir)
         {
-            // If intentionally resting, don’t waste energy or attempts.
             if (resting) return;
 
             bool staminaOK = RegularFrac() >= STAM_CLIMB_FRAC;
 
             // ── 1) Wall-attach jump ───────────────────────────────────────
-            if (staminaOK && !RecentlyExhausted() && ch.data.isGrounded && !ch.data.isClimbing &&
+            if (staminaOK && !RecentlyExhausted() && data.isGrounded && !data.isClimbing &&
                 Time.time >= nextWallAttempt && Regular() >= STAM_ATTACH_ABS)
             {
-                // Use horizontal forward; loosen thresholds a bit for sloped faces.
                 Vector3 fwd = Vector3.ProjectOnPlane(moveDir, Vector3.up).normalized;
                 const float wallProbeDist   = 2.2f;
                 const float maxAttachHeight = 12.0f;
-                const float minHeightDiff   = 0.60f;   // was 1.2f
+                float minHeightDiff = Mathf.Max(0.5f, bodyHeight * 0.33f);
 
-                if (fwd.sqrMagnitude > 1e-4f && Physics.Raycast(ch.Head, fwd, out RaycastHit hit, wallProbeDist, terrainMask))
+                if (fwd.sqrMagnitude > 1e-4f &&
+                    Physics.Raycast(HeadPos, fwd, out RaycastHit hit, wallProbeDist, terrainMask))
                 {
                     float heightDiff = hit.point.y - ch.Center.y;
                     bool tallEnough = heightDiff > minHeightDiff && heightDiff < maxAttachHeight;
-                    bool steepWall = Vector3.Dot(hit.normal, fwd) < -0.5f; // was -0.7f
+                    bool steepWall  = Vector3.Dot(hit.normal, fwd) < -0.5f;
 
                     if (tallEnough && steepWall)
                     {
-                        // Budget attach tax from planar distance + burst + headroom.
-                        float planar = Vector3.ProjectOnPlane(hit.point - ch.Center, Vector3.up).magnitude;
-                        float attachTax = 0.15f * planar; // StartClimb tax (absolute regular units)
-                        float burst = 0.20f;              // potential RPCA_ClimbJump later
-                        float headroom = 0.10f;           // one tick + safety
+                        float planar    = Vector3.ProjectOnPlane(hit.point - ch.Center, Vector3.up).magnitude;
+                        float attachTax = 0.15f * planar; // absolute regular units
+                        float burst     = 0.20f;
+                        float headroom  = 0.10f;
 
                         if (Regular() < (attachTax + burst + headroom))
                         {
-                            // Not enough regular to complete the opening sequence; path around and retry later.
                             nextWallAttempt = Time.time + 1f;
                         }
                         else
                         {
                             float around = EstimateNavDistance(ch.Center, player.Center);
                             float direct = Vector3.Distance(ch.Center, player.Center);
-                            bool worthClimb = around > direct * DETOUR_FACTOR;
-                            Debug.Log($"[WallAttach] around={around:F2}, direct={direct:F2}, DETOUR_FACTOR={DETOUR_FACTOR}, worthClimb={worthClimb}");
+                            bool worthClimb = !float.IsInfinity(around) && (around > direct * DETOUR_FACTOR);
+
+                            if (VERBOSE_LOGS) Debug.Log($"[WallAttach] around={around:F2}, direct={direct:F2}, worthClimb={worthClimb}");
 
                             if (worthClimb)
                             {
-                                // Try the physics jump + mid-air attach.
                                 StartCoroutine(JumpAndAttach());
                                 nextWallAttempt = Time.time + attachFailDelay;
-                                Debug.Log($"[WallAttach] nextWallAttempt set to {nextWallAttempt:F2}, attachFailDelay was {attachFailDelay:F2}");
 
-                                attachFailDelay = Mathf.Min(attachFailDelay * 2f, 4f); // exponential back-off
-                                consecutiveHops = 0; // reset escalation
+                                if (VERBOSE_LOGS) Debug.Log($"[WallAttach] scheduled next attempt @ {nextWallAttempt:F2}");
+
+                                attachFailDelay = Mathf.Min(attachFailDelay * 2f, 4f);
+                                consecutiveHops = 0;
                             }
                             else
                             {
-                                // Path around instead; retry after 1 s.
                                 nextWallAttempt = Time.time + 1f;
                             }
                         }
@@ -93,40 +84,40 @@ namespace Peak.BotClone
                 }
             }
 
-            // ── 2) Face-block small/medium step handling ──────────────────
-            if (staminaOK && !ch.data.isClimbing && !RecentlyExhausted())
+            // ── 2) Face-block small/medium step handling (body-aware) ─────
+            if (staminaOK && !data.isClimbing && !RecentlyExhausted())
             {
-                // Horizontal forward from chest, spherecast for robustness on uneven slopes
-                Vector3 fwd = Vector3.ProjectOnPlane(moveDir, Vector3.up).normalized;
-                Vector3 chest = ch.Center + Vector3.up * 0.6f;
-                Debug.Log($"[StepClimb] Checking for small obstacle; climbing={ch.data.isClimbing}");
+                Vector3 fwd   = Vector3.ProjectOnPlane(moveDir, Vector3.up).normalized;
+                Vector3 chest = ChestPos;
+
+                if (VERBOSE_LOGS) Debug.Log($"[StepClimb] checking; climbing={data.isClimbing}");
+
+                GetStepParams(out float STEP_MIN, out float STEP_MAX, out float STEP_RAY, out float STEP_RAD);
 
                 if (fwd.sqrMagnitude > 1e-4f &&
-                    Physics.SphereCast(chest, STEP_SPHERE_RAD, fwd, out RaycastHit hit, STEP_RAY_DIST, terrainMask))
+                    Physics.SphereCast(chest, STEP_RAD, fwd, out RaycastHit hit, STEP_RAY, terrainMask))
                 {
-                    // Estimate feet height: center minus approximate half-height.
-                    // If your Character exposes feet/height, use that instead.
-                    float feetY = ch.Center.y - 0.9f; // conservative default; adjust if you have a real value
                     float step = hit.point.y - feetY;
-                    Debug.Log($"[StepClimb] hit obstacle at {hit.point}, step={step:F2}");
 
-                    if (step >= STEP_MIN_CLIMB && step <= STEP_MAX_CLIMB)
+                    if (VERBOSE_LOGS) Debug.Log($"[StepClimb] hit {hit.collider?.name ?? "col"} at {hit.point}, step={step:F2}, band=[{STEP_MIN:F2},{STEP_MAX:F2}]");
+
+                    if (step >= STEP_MIN && step <= STEP_MAX)
                     {
-                        Debug.Log("[HandleMovement] ▶ TryClimb (medium step)");
+                        if (VERBOSE_LOGS) Debug.Log("[HandleMovement] ▶ TryClimb (medium step)");
                         MI_TryClimb?.Invoke(ch.refs.climbing, null);
-                        ch.input.jumpWasPressed = false; // avoid hop spam
+                        ch.input.jumpWasPressed = false;
                         consecutiveHops = 0;
                     }
-                    else if (step < STEP_MIN_CLIMB)
+                    else if (step < STEP_MIN)
                     {
                         if (Time.time >= nextHopOkAt)
                         {
-                            Debug.Log("[HandleMovement] ▶ Small hop");
+                            if (VERBOSE_LOGS) Debug.Log("[HandleMovement] ▶ Small hop");
                             ch.input.jumpWasPressed = true;
                             nextHopOkAt = Time.time + 0.25f;
                             if (++consecutiveHops >= 3)
                             {
-                                Debug.Log("[HandleMovement] ▶ Escalate after hop spam → TryClimb");
+                                if (VERBOSE_LOGS) Debug.Log("[HandleMovement] ▶ Escalate after hop spam → TryClimb");
                                 MI_TryClimb?.Invoke(ch.refs.climbing, null);
                                 consecutiveHops = 0;
                             }
@@ -136,12 +127,11 @@ namespace Peak.BotClone
                             ch.input.jumpWasPressed = false;
                         }
                     }
-                    else // step > STEP_MAX_CLIMB → treat as wall/attach territory
+                    else // step > STEP_MAX → treat as wall/attach territory
                     {
-                        Debug.Log("[HandleMovement] ▶ Big step → prefer wall attach next");
+                        if (VERBOSE_LOGS) Debug.Log("[HandleMovement] ▶ Big step → prefer wall attach next");
                         ch.input.jumpWasPressed = false;
-                        nextWallAttempt = Mathf.Min(nextWallAttempt, Time.time); // allow immediate wall attempt block to run
-                        // don't change hop counter here
+                        nextWallAttempt = Mathf.Min(nextWallAttempt, Time.time);
                     }
                 }
                 else
@@ -150,22 +140,27 @@ namespace Peak.BotClone
                 }
             }
 
-            // ── 3) Ledge-gap detection ────────────────────────────────────
-            if (staminaOK && !RecentlyExhausted() && Time.time >= nextLedgeAttempt && ch.data.isGrounded && !ch.data.isClimbing)
+            // ── 3) Ledge-gap detection (body-aware probe) ────────────────
+            if (staminaOK && !RecentlyExhausted() && Time.time >= nextLedgeAttempt && data.isGrounded && !data.isClimbing)
             {
-                Vector3 probe = ch.Center + moveDir.normalized * 0.8f + Vector3.up * 0.3f;
-                bool groundAhead = Physics.Raycast(probe, Vector3.down, 1.8f, terrainMask);
+                Vector3 probe = ChestPos + moveDir.normalized * Mathf.Max(0.8f, bodyRadius * 2f);
+                bool groundAhead = Physics.Raycast(
+                    probe,
+                    Vector3.down,
+                    Mathf.Max(1.2f, bodyHeight * 1.0f),
+                    terrainMask
+                );
 
                 if (!groundAhead && FindLedgeLanding(moveDir, out Vector3 landing))
                 {
                     float around = EstimateNavDistance(ch.Center, player.Center);
                     float direct = Vector3.Distance(ch.Center, player.Center);
 
-                    if (around > direct * DETOUR_FACTOR)
+                    if (!float.IsInfinity(around) && (around > direct * DETOUR_FACTOR))
                     {
-                        Debug.Log("[HandleMovement] ▶ Gap jump RPC");
+                        if (VERBOSE_LOGS) Debug.Log("[HandleMovement] ▶ Gap jump RPC");
 
-                        ch.data.lookValues = DirToLook((landing - ch.Center).normalized);
+                        data.lookValues = DirToLook((landing - ch.Center).normalized);
                         if (ch.refs.view.IsMine)
                             ch.refs.view.RPC("JumpRpc", RpcTarget.All, false);
 
@@ -175,13 +170,24 @@ namespace Peak.BotClone
                 }
             }
 
-            // ── 4) Convert world moveDir → local XY for CharacterInput.
+            // ── 4) Convert world moveDir → local XY for CharacterInput. ───
             Vector3 local = ch.transform.InverseTransformDirection(moveDir);
             ch.input.movementInput = new Vector2(local.x * 0.75f, local.z).normalized;
         }
 
         /// <summary>
-        /// Simplified NavJumper-style ledge scan.
+        /// Compute body-aware step/hop probe parameters (derived from bodyHeight/bodyRadius).
+        /// </summary>
+        private void GetStepParams(out float min, out float max, out float ray, out float rad)
+        {
+            min = bodyHeight * 0.20f;                               // previously 0.30f
+            max = bodyHeight * 0.80f;                               // previously 1.40f
+            ray = Mathf.Max(1.0f, bodyHeight * 0.90f);              // previously 1.6f
+            rad = Mathf.Clamp(bodyRadius * 0.60f, 0.15f, 0.35f);    // previously 0.20f
+        }
+
+        /// <summary>
+        /// Simplified NavJumper-style ledge scan (unchanged structure; uses current settings).
         /// </summary>
         private bool FindLedgeLanding(Vector3 forwardDir, out Vector3 best)
         {
@@ -197,8 +203,8 @@ namespace Peak.BotClone
                     hits.Add(h);
             }
 
-            var flat = hits.Where(h => Vector3.Angle(h.normal, Vector3.up) < 50f);
-            var near = flat.Where(h => Vector3.Distance(h.point, origin) < LEDGE_MAX_DIST);
+            var flat    = hits.Where(h => Vector3.Angle(h.normal, Vector3.up) < 50f);
+            var near    = flat.Where(h => Vector3.Distance(h.point, origin) < LEDGE_MAX_DIST);
             var forward = near.Where(h => Vector3.Dot(forwardDir, (h.point - origin).normalized) > 0.5f && h.point.y > origin.y);
             if (!forward.Any()) return false;
 
@@ -207,7 +213,7 @@ namespace Peak.BotClone
                 .First()
                 .point;
 
-            Debug.DrawLine(origin + Vector3.up * 0.1f, best + Vector3.up * 0.1f, Color.green, 1f);
+            // Removed Debug.DrawLine to keep runtime-only and minimal.
             return true;
         }
 
@@ -218,7 +224,7 @@ namespace Peak.BotClone
         {
             if (dir.sqrMagnitude < 1e-4f) return Vector2.zero;
             dir.Normalize();
-            float yaw = Mathf.Atan2(dir.x, dir.z) * Mathf.Rad2Deg;
+            float yaw   = Mathf.Atan2(dir.x, dir.z) * Mathf.Rad2Deg;
             float pitch = -Mathf.Asin(dir.y) * Mathf.Rad2Deg;
             return new Vector2(yaw, pitch);
         }
@@ -234,7 +240,7 @@ namespace Peak.BotClone
             if (ch.refs.view.IsMine)
                 ch.refs.view.RPC("JumpRpc", RpcTarget.All, false);
 
-            // Wait ~¼ second to reach apex then call TryClimb (private).
+            // Wait a short moment to be airborne, then try to attach.
             yield return new WaitForSeconds(0.15f);
 
             MI_TryClimb?.Invoke(ch.refs.climbing, null);
