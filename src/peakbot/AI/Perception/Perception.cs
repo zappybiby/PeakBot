@@ -21,17 +21,17 @@ namespace Peak.BotClone
         private const float DETOUR_RECALC_PERIOD = 0.35f;
 
         private const float STEP_PROBE_DIST = 0.9f;
-        private const float STEP_MAX_HOP    = 0.60f;
-        private const float STEP_MIN_HOP    = 0.12f;
-        private const float STEP_LATERAL    = 0.30f;
+        private const float STEP_MAX_HOP = 0.60f;
+        private const float STEP_MIN_HOP = 0.12f;
+        private const float STEP_LATERAL = 0.30f;
 
-        private const float WALL_MAX_RANGE  = 1.3f;
-        private const float WALL_STEEP_Y    = 0.30f;
+        private const float WALL_MAX_RANGE = 1.3f;
+        private const float WALL_STEEP_Y = 0.30f;
 
         private readonly float _ledgeRadius;
         private readonly float _ledgeHeight;
         private readonly float _ledgeMaxDist;
-        private readonly int   _terrainMask;
+        private readonly int _terrainMask;
 
         public Perception(GraphFollower gf, Character ch, CharacterData data, Character player, Bot bot,
                           float ledgeRadius, float ledgeHeight, float ledgeMaxDist, int terrainMask)
@@ -42,19 +42,19 @@ namespace Peak.BotClone
             _player = player;
             _bot = bot;
 
-            _ledgeRadius  = ledgeRadius;
-            _ledgeHeight  = ledgeHeight;
+            _ledgeRadius = ledgeRadius;
+            _ledgeHeight = ledgeHeight;
             _ledgeMaxDist = ledgeMaxDist;
-            _terrainMask  = terrainMask;
+            _terrainMask = terrainMask;
         }
 
         public Blackboard BuildBlackboard(Vector3 moveDir)
         {
             Vector3 self = _ch.Center;
             Vector3 plyr = _player.Center;
-            float   dist = Vector3.Distance(self, plyr);
+            float dist = Vector3.Distance(self, plyr);
 
-            float stamAbs  = _gf.Regular();
+            float stamAbs = _gf.Regular();
             float stamFrac = _gf.RegularFrac();
 
             bool hasPath = false, complete = false;
@@ -62,19 +62,19 @@ namespace Peak.BotClone
             var agent = _bot.navigator?.agent;
             if (agent != null && agent.isOnNavMesh)
             {
-                hasPath  = agent.hasPath;
+                hasPath = agent.hasPath;
                 complete = agent.hasPath && agent.pathStatus == NavMeshPathStatus.PathComplete;
             }
             detourRatio = EstimateDetourRatioCached(self, plyr);
 
             var step = ProbeStep(self, moveDir);
             var wall = ProbeWall(self, moveDir);
-            var gap  = ProbeGap(self, moveDir);
+            var gap = ProbeGap(self, moveDir);
 
             return new Blackboard
             {
-                SelfPos      = self,
-                PlayerPos    = plyr,
+                SelfPos = self,
+                PlayerPos = plyr,
                 DistToPlayer = dist,
 
                 IsGrounded = _data.isGrounded,
@@ -83,17 +83,17 @@ namespace Peak.BotClone
                 RecentlyExhausted = _gf.RecentlyExhausted(),
 
                 StaminaRegular = stamAbs,
-                StaminaFrac    = stamFrac,
+                StaminaFrac = stamFrac,
 
                 MoveDir = moveDir,
 
-                HasNavMeshPath  = hasPath,
+                HasNavMeshPath = hasPath,
                 NavPathComplete = complete,
-                DetourRatio     = detourRatio,
+                DetourRatio = detourRatio,
 
                 Step = step,
                 Wall = wall,
-                Gap  = gap
+                Gap = gap
             };
         }
 
@@ -117,12 +117,12 @@ namespace Peak.BotClone
             int lateralAgree = 0;
 
             bool centerBlock = RayToObstacle(chest, dir, out float centerH);
-            bool leftBlock   = RayToObstacle(chest + Vector3.Cross(Vector3.up, dir) * -STEP_LATERAL, dir, out float leftH);
-            bool rightBlock  = RayToObstacle(chest + Vector3.Cross(Vector3.up, dir) *  STEP_LATERAL, dir, out float rightH);
+            bool leftBlock = RayToObstacle(chest + Vector3.Cross(Vector3.up, dir) * -STEP_LATERAL, dir, out float leftH);
+            bool rightBlock = RayToObstacle(chest + Vector3.Cross(Vector3.up, dir) * STEP_LATERAL, dir, out float rightH);
 
             if (centerBlock) bestHeight = Mathf.Max(bestHeight, centerH);
-            if (leftBlock)   bestHeight = Mathf.Max(bestHeight, leftH);
-            if (rightBlock)  bestHeight = Mathf.Max(bestHeight, rightH);
+            if (leftBlock) bestHeight = Mathf.Max(bestHeight, leftH);
+            if (rightBlock) bestHeight = Mathf.Max(bestHeight, rightH);
 
             if (leftBlock && rightBlock)
                 lateralAgree = 2;
@@ -154,12 +154,14 @@ namespace Peak.BotClone
             return false;
         }
 
+        // Perception/Perception.cs (inside the Perception class)
+
         private WallAttachInfo ProbeWall(Vector3 origin, Vector3 moveDir)
         {
             if (moveDir.sqrMagnitude < 1e-6f) return default;
 
             float headH = _data.currentHeadHeight > 0 ? _data.currentHeadHeight
-                       : (_data.targetHeadHeight > 0 ? _data.targetHeadHeight : 1.8f);
+                    : (_data.targetHeadHeight > 0 ? _data.targetHeadHeight : 1.8f);
             float feetY = _data.isGrounded ? _data.groundPos.y : origin.y - Mathf.Max(_data.targetHeadHeight * 0.5f, 0.7f);
             float headY = feetY + headH;
             float chestY = Mathf.Lerp(feetY, headY, _data.isCrouching ? 0.54f : 0.60f);
@@ -167,19 +169,32 @@ namespace Peak.BotClone
             Vector3 dir = new Vector3(moveDir.x, 0f, moveDir.z).normalized;
 
             // Try ray from head, then chest.
-            if (Physics.Raycast(new Vector3(origin.x, headY, origin.z), dir, out var hit, WALL_MAX_RANGE, _terrainMask, QueryTriggerInteraction.Ignore) ||
-                Physics.Raycast(new Vector3(origin.x, chestY, origin.z), dir, out hit, WALL_MAX_RANGE, _terrainMask, QueryTriggerInteraction.Ignore))
+            if (Physics.Raycast(new Vector3(origin.x, headY,   origin.z), dir, out var hit, WALL_MAX_RANGE, _terrainMask, QueryTriggerInteraction.Ignore) ||
+                Physics.Raycast(new Vector3(origin.x, chestY,  origin.z), dir, out hit,    WALL_MAX_RANGE, _terrainMask, QueryTriggerInteraction.Ignore))
             {
-                bool steep = hit.normal.y <= WALL_STEEP_Y;
-                float planar = Vector3.ProjectOnPlane(hit.point - new Vector3(origin.x, hit.point.y, origin.z), Vector3.up).magnitude;
+                // Match the game's acceptance: slight underhangs and moderate overhangs are ok
+                float climbAngle = Vector3.Angle(hit.normal, Vector3.up); // 0=flat up, 90=vertical
+                bool acceptable  = AcceptableGrabAngle(climbAngle);
 
-                // close enough & steep → candidate attach
-                bool canAttach = steep && planar <= 0.8f; // tighter than WALL_MAX_RANGE for actual attach
-                return new WallAttachInfo { IsSteep = steep, CanAttach = canAttach, PlanarDist = planar, Normal = hit.normal };
+                // Must also be close enough in the plane
+                float planar = Vector3.ProjectOnPlane(hit.point - new Vector3(origin.x, hit.point.y, origin.z), Vector3.up).magnitude;
+                bool withinReach = planar <= 0.8f; // tighter than cast range
+
+                bool canAttach = acceptable && withinReach;
+
+                return new WallAttachInfo
+                {
+                    IsSteep   = climbAngle >= 70f,   // informational
+                    CanAttach = canAttach,
+                    PlanarDist= planar,
+                    Normal    = hit.normal,
+                    AngleDeg  = climbAngle
+                };
             }
 
             return default;
         }
+
 
         private GapInfo ProbeGap(Vector3 origin, Vector3 moveDir)
         {
@@ -220,8 +235,8 @@ namespace Peak.BotClone
                 return _cachedDetourRatio;
 
             _lastDetourFrom = from;
-            _lastDetourTo   = to;
-            _nextDetourAt   = Time.time + DETOUR_RECALC_PERIOD;
+            _lastDetourTo = to;
+            _nextDetourAt = Time.time + DETOUR_RECALC_PERIOD;
 
             float pathLen = float.PositiveInfinity;
 
@@ -252,5 +267,17 @@ namespace Peak.BotClone
 
             return _cachedDetourRatio;
         }
+        // Perception/Perception.cs (inside the Perception class)
+
+        private static bool AcceptableGrabAngle(float climbAngleDeg)
+        {
+            // Mirrors CharacterClimbing.AcceptableGrabAngle:
+            // Overhang (angle > 90): allow up to ~80° past vertical → angle <= 170
+            // Underhang (angle < 90): allow down to ~50° from vertical → angle >= 50
+            float f = climbAngleDeg - 90f;
+            if (f > 0f)  return Mathf.Abs(f) <= 80f;  // up to 170°
+            else         return Mathf.Abs(f) <= 40f;  // down to 50°
+        }
+
     }
 }

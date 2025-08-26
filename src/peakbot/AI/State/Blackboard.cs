@@ -13,10 +13,11 @@ namespace Peak.BotClone
 
     internal struct WallAttachInfo
     {
-        public bool     IsSteep;      // front surface is steep enough to climb
-        public bool     CanAttach;    // close + steep + unobstructed
-        public float    PlanarDist;   // planar distance from chest/head to surface
-        public Vector3  Normal;       // wall normal at probe
+        public bool IsSteep;      // front surface is steep enough to climb
+        public bool CanAttach;    // close + steep + unobstructed
+        public float PlanarDist;   // planar distance from chest/head to surface
+        public Vector3 Normal;       // wall normal at probe
+        public float    AngleDeg;     // angle between wall normal and +Y (0=flat up, 90=vertical, 170=overhang)
     }
 
     internal struct GapInfo
