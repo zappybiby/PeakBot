@@ -1,4 +1,4 @@
-# PeakBot repo overview (organized)
+# PeakBot
 
 ## Config
 
