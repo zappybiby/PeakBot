@@ -1,9 +1,6 @@
 // /AI/GraphFollower.Movement.cs
-// -----------------------------------------------------------------------------
-// Movement/interaction logic for GraphFollower: wall-attach jump, small-step
-// climbs/hops with hop cooldown and escalation, ledge-gap detection,
-// and input translation.
-// -----------------------------------------------------------------------------
+// Movement/interaction logic for GraphFollower: wall-attach jump, small-step hops/climbs,
+// ledge-gap detection, and input translation.
 
 using System.Collections;
 using System.Collections.Generic;
@@ -15,22 +12,23 @@ namespace Peak.BotClone
 {
     internal partial class GraphFollower
     {
-        // Hop anti-spam & escalation.
         private float nextHopOkAt;
         private int consecutiveHops;
 
-        /// <summary>
-        /// Orchestrates movement decisions for the bot, including wall-attach
-        /// jumps, small obstacle climbs/hops, ledge-gap jumps, and converting a
-        /// world-space direction into local input for the Character.
-        /// </summary>
+        // Adaptive hop gating
+        private readonly float[] stepNoise = new float[60];
+        private int stepNoiseIdx = 0, stepNoiseCount = 0;
+        private Vector3 lastHopPos, lastHopFwd;
+        private bool hasHopHistory = false;
+        private Vector3 prevMoveDir = Vector3.zero;
+
         private void HandleMovement(Vector3 moveDir)
         {
             if (resting) return;
 
             bool staminaOK = RegularFrac() >= STAM_CLIMB_FRAC;
 
-            // ── 1) Wall-attach jump ───────────────────────────────────────
+            // Wall-attach jump probe
             if (staminaOK && !RecentlyExhausted() && data.isGrounded && !data.isClimbing &&
                 Time.time >= nextWallAttempt && Regular() >= STAM_ATTACH_ABS)
             {
@@ -49,7 +47,7 @@ namespace Peak.BotClone
                     if (tallEnough && steepWall)
                     {
                         float planar    = Vector3.ProjectOnPlane(hit.point - ch.Center, Vector3.up).magnitude;
-                        float attachTax = 0.15f * planar; // absolute regular units
+                        float attachTax = 0.15f * planar;
                         float burst     = 0.20f;
                         float headroom  = 0.10f;
 
@@ -70,7 +68,7 @@ namespace Peak.BotClone
                                 StartCoroutine(JumpAndAttach());
                                 nextWallAttempt = Time.time + attachFailDelay;
 
-                                if (VERBOSE_LOGS) Debug.Log($"[WallAttach] scheduled next attempt @ {nextWallAttempt:F2}");
+                                if (VERBOSE_LOGS) Debug.Log($"[WallAttach] next attempt @ {nextWallAttempt:F2}");
 
                                 attachFailDelay = Mathf.Min(attachFailDelay * 2f, 4f);
                                 consecutiveHops = 0;
@@ -84,7 +82,7 @@ namespace Peak.BotClone
                 }
             }
 
-            // ── 2) Face-block small/medium step handling (body-aware) ─────
+            // Small/medium step handling
             if (staminaOK && !data.isClimbing && !RecentlyExhausted())
             {
                 Vector3 fwd   = Vector3.ProjectOnPlane(moveDir, Vector3.up).normalized;
@@ -103,33 +101,36 @@ namespace Peak.BotClone
 
                     if (step >= STEP_MIN && step <= STEP_MAX)
                     {
-                        if (VERBOSE_LOGS) Debug.Log("[HandleMovement] ▶ TryClimb (medium step)");
+                        if (VERBOSE_LOGS) Debug.Log("[HandleMovement] TryClimb (medium step)");
                         MI_TryClimb?.Invoke(ch.refs.climbing, null);
                         ch.input.jumpWasPressed = false;
                         consecutiveHops = 0;
                     }
                     else if (step < STEP_MIN)
                     {
-                        if (Time.time >= nextHopOkAt)
+                        bool okToHop = ShouldHopAfterGates(moveDir, fwd, STEP_RAD, STEP_RAY, step);
+
+                        if (okToHop)
                         {
-                            if (VERBOSE_LOGS) Debug.Log("[HandleMovement] ▶ Small hop");
+                            if (VERBOSE_LOGS) Debug.Log("[HandleMovement] Small hop (gated)");
                             ch.input.jumpWasPressed = true;
+
+                            lastHopPos  = ch.Center;
+                            lastHopFwd  = fwd;
+                            hasHopHistory = true;
+
                             nextHopOkAt = Time.time + 0.25f;
-                            if (++consecutiveHops >= 3)
-                            {
-                                if (VERBOSE_LOGS) Debug.Log("[HandleMovement] ▶ Escalate after hop spam → TryClimb");
-                                MI_TryClimb?.Invoke(ch.refs.climbing, null);
-                                consecutiveHops = 0;
-                            }
+                            consecutiveHops = 0;
                         }
                         else
                         {
                             ch.input.jumpWasPressed = false;
+                            ObserveStepNoise(step);
                         }
                     }
-                    else // step > STEP_MAX → treat as wall/attach territory
+                    else // step > STEP_MAX
                     {
-                        if (VERBOSE_LOGS) Debug.Log("[HandleMovement] ▶ Big step → prefer wall attach next");
+                        if (VERBOSE_LOGS) Debug.Log("[HandleMovement] Big step → wall attach preference");
                         ch.input.jumpWasPressed = false;
                         nextWallAttempt = Mathf.Min(nextWallAttempt, Time.time);
                     }
@@ -137,10 +138,11 @@ namespace Peak.BotClone
                 else
                 {
                     ch.input.jumpWasPressed = false;
+                    ObserveStepNoise(0f);
                 }
             }
 
-            // ── 3) Ledge-gap detection (body-aware probe) ────────────────
+            // Ledge/gap detection
             if (staminaOK && !RecentlyExhausted() && Time.time >= nextLedgeAttempt && data.isGrounded && !data.isClimbing)
             {
                 Vector3 probe = ChestPos + moveDir.normalized * Mathf.Max(0.8f, bodyRadius * 2f);
@@ -158,7 +160,7 @@ namespace Peak.BotClone
 
                     if (!float.IsInfinity(around) && (around > direct * DETOUR_FACTOR))
                     {
-                        if (VERBOSE_LOGS) Debug.Log("[HandleMovement] ▶ Gap jump RPC");
+                        if (VERBOSE_LOGS) Debug.Log("[HandleMovement] Gap jump RPC");
 
                         data.lookValues = DirToLook((landing - ch.Center).normalized);
                         if (ch.refs.view.IsMine)
@@ -170,25 +172,21 @@ namespace Peak.BotClone
                 }
             }
 
-            // ── 4) Convert world moveDir → local XY for CharacterInput. ───
+            // Input conversion
             Vector3 local = ch.transform.InverseTransformDirection(moveDir);
             ch.input.movementInput = new Vector2(local.x * 0.75f, local.z).normalized;
+
+            prevMoveDir = moveDir;
         }
 
-        /// <summary>
-        /// Compute body-aware step/hop probe parameters (derived from bodyHeight/bodyRadius).
-        /// </summary>
         private void GetStepParams(out float min, out float max, out float ray, out float rad)
         {
-            min = bodyHeight * 0.20f;                               // previously 0.30f
-            max = bodyHeight * 0.80f;                               // previously 1.40f
-            ray = Mathf.Max(1.0f, bodyHeight * 0.90f);              // previously 1.6f
-            rad = Mathf.Clamp(bodyRadius * 0.60f, 0.15f, 0.35f);    // previously 0.20f
+            min = bodyHeight * 0.20f;
+            max = bodyHeight * 0.80f;
+            ray = Mathf.Max(1.0f, bodyHeight * 0.90f);
+            rad = Mathf.Clamp(bodyRadius * 0.60f, 0.15f, 0.35f);
         }
 
-        /// <summary>
-        /// Simplified NavJumper-style ledge scan (unchanged structure; uses current settings).
-        /// </summary>
         private bool FindLedgeLanding(Vector3 forwardDir, out Vector3 best)
         {
             best = Vector3.zero;
@@ -213,13 +211,9 @@ namespace Peak.BotClone
                 .First()
                 .point;
 
-            // Removed Debug.DrawLine to keep runtime-only and minimal.
             return true;
         }
 
-        /// <summary>
-        /// Convert a world-space direction to (yaw, pitch) look values.
-        /// </summary>
         private static Vector2 DirToLook(Vector3 dir)
         {
             if (dir.sqrMagnitude < 1e-4f) return Vector2.zero;
@@ -229,22 +223,109 @@ namespace Peak.BotClone
             return new Vector2(yaw, pitch);
         }
 
-        /// <summary>
-        /// Performs the physics jump then triggers TryClimb mid-air.
-        /// </summary>
         private IEnumerator JumpAndAttach()
         {
-            attachFailDelay = 1f; // success → reset back-off
+            attachFailDelay = 1f;
 
-            // Broadcast the real jump to all clients so animation syncs.
             if (ch.refs.view.IsMine)
                 ch.refs.view.RPC("JumpRpc", RpcTarget.All, false);
 
-            // Wait a short moment to be airborne, then try to attach.
             yield return new WaitForSeconds(0.15f);
 
             MI_TryClimb?.Invoke(ch.refs.climbing, null);
             consecutiveHops = 0;
+        }
+
+        // Adaptive noise & gating helpers
+
+        private void ObserveStepNoise(float h)
+        {
+            stepNoise[stepNoiseIdx++ % stepNoise.Length] = Mathf.Max(0f, h);
+            stepNoiseCount = Mathf.Min(stepNoiseCount + 1, stepNoise.Length);
+        }
+
+        private float StepNoiseP95()
+        {
+            int n = stepNoiseCount;
+            if (n == 0) return 0f;
+            var tmp = new float[n];
+            System.Array.Copy(stepNoise, tmp, n);
+            System.Array.Sort(tmp);
+            int k = Mathf.Clamp(Mathf.CeilToInt(0.95f * (n - 1)), 0, n - 1);
+            return tmp[k];
+        }
+
+        private bool ShouldHopAfterGates(Vector3 moveDir, Vector3 fwd, float STEP_RAD, float STEP_RAY, float stepHeight)
+        {
+            // Gap veto
+            Vector3 probe = ChestPos + fwd * Mathf.Max(0.8f, bodyRadius * 2f);
+            bool groundAhead = Physics.Raycast(
+                probe,
+                Vector3.down,
+                Mathf.Max(1.2f, bodyHeight * 1.0f),
+                terrainMask
+            );
+            if (!groundAhead)
+            {
+                if (VERBOSE_LOGS) Debug.Log("[HopGate] gap ahead");
+                return false;
+            }
+
+            // Lateral vote at knee height
+            float kneeY = feetY + bodyHeight * 0.25f;
+            Vector3 knee = new Vector3(ChestPos.x, kneeY, ChestPos.z);
+            Vector3 lat  = Vector3.Cross(Vector3.up, fwd).normalized * (bodyRadius * 0.8f);
+
+            int agree = 0, walls = 0;
+            for (int i = -1; i <= 1; i++)
+            {
+                Vector3 origin = knee + lat * i;
+                if (Physics.SphereCast(origin, STEP_RAD, fwd, out RaycastHit h2, STEP_RAY, terrainMask))
+                {
+                    float up = Vector3.Dot(h2.normal, Vector3.up);
+                    if (up >= 0.3f) agree++;
+                    if (up <= 0.2f) walls++;
+                }
+            }
+            if (agree < 2 || walls > 0)
+            {
+                if (VERBOSE_LOGS) Debug.Log($"[HopGate] lateral vote (agree={agree}, walls={walls})");
+                return false;
+            }
+
+            // Heading stability
+            Vector3 prevFwd = Vector3.ProjectOnPlane(prevMoveDir, Vector3.up).normalized;
+            bool headingStable = (prevFwd.sqrMagnitude < 1e-6f) || (Vector3.Dot(prevFwd, fwd) >= 0.95f);
+            if (!headingStable)
+            {
+                if (VERBOSE_LOGS) Debug.Log("[HopGate] heading unstable");
+                return false;
+            }
+
+            // Noise floor
+            float noise = StepNoiseP95();
+            if (stepHeight < noise)
+            {
+                if (VERBOSE_LOGS) Debug.Log($"[HopGate] stepHeight({stepHeight:F2}) < noiseP95({noise:F2})");
+                return false;
+            }
+
+            // Progress + time refractory
+            bool timeOk = (Time.time >= nextHopOkAt);
+            bool progressOk = true;
+            if (hasHopHistory)
+            {
+                float planarAdvance = Vector3.ProjectOnPlane(ch.Center - lastHopPos, Vector3.up).magnitude;
+                progressOk = planarAdvance >= (2f * bodyRadius);
+                if (!progressOk && VERBOSE_LOGS) Debug.Log($"[HopGate] progress {planarAdvance:F2} < {(2f * bodyRadius):F2}");
+            }
+
+            if (VERBOSE_LOGS)
+            {
+                Debug.Log($"[HopGate] ground={groundAhead} agree={agree} walls={walls} step={stepHeight:F2} noiseP95={noise:F2} headStable={headingStable} timeOk={timeOk} progressOk={progressOk}");
+            }
+
+            return timeOk && progressOk;
         }
     }
 }
