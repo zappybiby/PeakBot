@@ -5,8 +5,7 @@ using UnityEngine;
 namespace Peak.BotClone
 {
     internal enum BotActionType { Follow, Sprint, Rest, Hop, WallAttach, GapJump }
-
-    // AI/Decision/BotBrain.cs  (add field)
+    
     internal sealed class BotDecision
     {
         public BotActionType Type;
@@ -83,6 +82,20 @@ namespace Peak.BotClone
                 // If stamina is only barely above climb threshold, be cautious.
                 if (bb.StaminaFrac < _climbFrac) wa *= 0.5f;
             }
+            if (wa > 0f)
+            {
+                // Map angle [50°, 170°] → [0..1], where 0 ~ easier (around 50–90°), 1 ~ very steep/overhang
+                float ang01 = Mathf.InverseLerp(50f, 170f, Mathf.Clamp(bb.Wall.AngleDeg, 0f, 180f));
+
+                // Stamina ease: low stamina reduces willingness to tackle high angles
+                float stamEase = Mathf.SmoothStep(0.4f, 1f, Mathf.Clamp01(bb.StaminaFrac));
+
+                // Final multiplier: keep 1.0 on easy walls with good stamina, taper toward ~0.6 on hard walls/low stamina
+                float anglePenalty = Mathf.Lerp(0.6f, 1f, (1f - ang01) * stamEase);
+
+                wa *= anglePenalty;
+            }
+
             scores["WallAttach"] = wa;
 
             // --- GapJump (jump over a gap if landing looks valid) ---
