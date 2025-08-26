@@ -243,9 +243,3 @@ Desktop.ini
 
 peakbot/.rooignore
 *.ps1
-artifacts/
-**/bin/
-**/obj/
-*.zip
-*.dll
-*.deps.json
