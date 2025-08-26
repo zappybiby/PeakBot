@@ -71,9 +71,14 @@ namespace Peak.BotClone
             float wa = 0f;
             if (bb.IsGrounded && !bb.IsClimbing && bb.Wall.CanAttach && bb.StaminaRegular >= _attachAbs && CDReady("WallAttach"))
             {
-                // Wall is attractive when detour via ground is costly.
                 float detourCurve = Mathf.InverseLerp(_detourFactor, _detourFactor * 2f, bb.DetourRatio);
                 wa = detourCurve;
+
+                // Prefer ground if a complete nav path exists.
+                if (bb.NavPathComplete) wa *= 0.2f;
+
+                // If stamina is only barely above climb threshold, be cautious.
+                if (bb.StaminaFrac < _climbFrac) wa *= 0.5f;
             }
             scores["WallAttach"] = wa;
 
@@ -81,10 +86,11 @@ namespace Peak.BotClone
             float gj = 0f;
             if (bb.IsGrounded && !bb.IsClimbing && bb.Gap.HasLanding && bb.StaminaFrac >= _sprintFrac && CDReady("GapJump"))
             {
-                // Same detour incentive; light distance preference.
                 float detourCurve = Mathf.InverseLerp(_detourFactor, _detourFactor * 1.8f, bb.DetourRatio);
-                float distPref = Mathf.InverseLerp(0.8f, 4.0f, Mathf.Clamp(bb.Gap.Distance, 0.8f, 4f));
+                float distPref    = Mathf.InverseLerp(0.8f, 4.0f, Mathf.Clamp(bb.Gap.Distance, 0.8f, 4f));
                 gj = 0.5f * detourCurve + 0.5f * distPref;
+
+                if (bb.NavPathComplete) gj *= 0.25f; // ground path exists; only jump if it's clearly better
             }
             scores["GapJump"] = gj;
 
