@@ -1,6 +1,7 @@
 // AI/GraphFollower.Actions.cs
 using Photon.Pun;
 using UnityEngine;
+using System.Collections;
 
 namespace Peak.BotClone
 {
@@ -14,8 +15,8 @@ namespace Peak.BotClone
         {
             switch (d.Type)
             {
-                case BotActionType.Hop:        TryHop(bb);        break;
-                case BotActionType.GapJump:    TryGapJump(bb);    break;
+                case BotActionType.Hop: TryHop(bb); break;
+                case BotActionType.GapJump: TryGapJump(bb); break;
                 case BotActionType.WallAttach: TryWallAttach(bb); break;
                 default: break; // Follow/Sprint/Rest handled elsewhere
             }
@@ -43,21 +44,39 @@ namespace Peak.BotClone
             SendJumpRpc();
         }
 
+
         private void TryWallAttach(in Blackboard bb)
         {
             if (!bb.IsGrounded || data.isClimbing || !bb.Wall.CanAttach) return;
 
-            // Face the wall (moveDir already faces movement; nudge if needed).
-            Vector3 fwd = bb.MoveDir.sqrMagnitude > 1e-4f ? bb.MoveDir : (player.Center - ch.Center);
-            fwd.y = 0f;
+            // Prefer aiming *into* the wall using the sensed normal.
+            Vector3 fwd = Vector3.zero;
+            if (bb.Wall.Normal != Vector3.zero)
+            {
+                // Face opposite the wall normal (flattened on XZ for clean yaw).
+                fwd = -Vector3.ProjectOnPlane(bb.Wall.Normal, Vector3.up);
+            }
+            // Fallback to movement/player direction if normal was unavailable.
+            if (fwd.sqrMagnitude < 1e-4f)
+            {
+                fwd = bb.MoveDir.sqrMagnitude > 1e-4f ? bb.MoveDir : (player.Center - ch.Center);
+                fwd.y = 0f;
+            }
+
             if (fwd.sqrMagnitude > 1e-4f)
+            {
                 data.lookValues = DirToLook(fwd.normalized);
+                // IMPORTANT: update lookDirection/lookDirection_Flat right now,
+                // since CharacterClimbing will read lookDirection_Flat this frame.
+                ch.RecalculateLookDirections();
+            }
 
-            // Jump, then immediately try to climb (matches your “jump-then-latch” pattern).
+            // Jump, then immediately try to climb (matches the game's "jump-then-grab" flow).
             SendJumpRpc();
-
-            // Use reflection to call CharacterClimbing.TryClimb (already cached).
             MI_TryClimb?.Invoke(ch.refs.climbing, null);
+
+            // Optional: a tiny delayed re-poke helps if the first call races the jump.
+            if (isActiveAndEnabled) StartCoroutine(CoClimbRetry(0.12f));
         }
 
         /// <summary>
@@ -67,10 +86,10 @@ namespace Peak.BotClone
         {
             // Same conditions the game enforces before calling JumpRpc:
             if (ch.data.jumpsRemaining <= 0) return false; // no jumps left
-            if (!ch.CheckJump())            return false;   // not allowed (climbing/rope/vine/handle/etc.)
+            if (!ch.CheckJump()) return false;   // not allowed (climbing/rope/vine/handle/etc.)
             if (ch.data.sinceGrounded > 0.20f) return false; // been airborne too long
-            if (ch.data.sinceJump < 0.30f)     return false; // debounce jump spam
-            if (ch.data.chargingJump)          return false; // mid-charge
+            if (ch.data.sinceJump < 0.30f) return false; // debounce jump spam
+            if (ch.data.chargingJump) return false; // mid-charge
 
             return true;
         }
@@ -84,5 +103,14 @@ namespace Peak.BotClone
             if (ch.refs.view != null && ch.refs.view.IsMine)
                 ch.refs.view.RPC("JumpRpc", RpcTarget.All, false);
         }
+        private IEnumerator CoClimbRetry(float delay)
+        {
+            yield return new WaitForSeconds(delay);
+            if (!data.isClimbing && ch != null && ch.refs != null && ch.refs.climbing != null)
+            {
+                MI_TryClimb?.Invoke(ch.refs.climbing, null);
+            }
+        }
+
     }
 }
