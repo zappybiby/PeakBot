@@ -1,0 +1,25 @@
+<Project>
+  <PropertyGroup>
+    <!-- The root directory of your PEAK game installation. -->
+    <PeakGameRootDir>E:\steam\steamapps\common\PEAK</PeakGameRootDir>
+
+    <!-- The BepInEx plugins directory in your Thunderstore Mod Manager profile. -->
+    <PeakPluginsDir>C:\Users\brian\AppData\Roaming\Thunderstore Mod Manager\DataFolder\PEAK\profiles\Default\BepInEx\plugins</PeakPluginsDir>
+  </PropertyGroup>
+
+  <!-- This target now creates a subfolder and copies your mod into it for easy testing. -->
+  <Target Name="DeployFiles" AfterTargets="Build">
+    <!-- Define the full path for your mod's subfolder -->
+    <PropertyGroup>
+      <ModDeployFolder>$(PeakPluginsDir)\pharmacomaniac-SpeedrunTimer</ModDeployFolder>
+    </PropertyGroup>
+
+    <Message Text="Deploying to $(ModDeployFolder)" Importance="High" />
+
+    <!-- Ensure the destination directory exists -->
+    <MakeDir Directories="$(ModDeployFolder)" />
+
+    <!-- Copy the DLL to the new subfolder -->
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ModDeployFolder)" />
+  </Target>
+</Project>
