@@ -154,41 +154,49 @@ namespace Peak.BotClone
             return false;
         }
 
-        // Perception/Perception.cs (inside the Perception class)
-
         private WallAttachInfo ProbeWall(Vector3 origin, Vector3 moveDir)
         {
             if (moveDir.sqrMagnitude < 1e-6f) return default;
 
-            float headH = _data.currentHeadHeight > 0 ? _data.currentHeadHeight
-                    : (_data.targetHeadHeight > 0 ? _data.targetHeadHeight : 1.8f);
-            float feetY = _data.isGrounded ? _data.groundPos.y : origin.y - Mathf.Max(_data.targetHeadHeight * 0.5f, 0.7f);
-            float headY = feetY + headH;
+            // Derive head/chest heights from CharacterData (runtime-safe).
+            float headH  = (_data.currentHeadHeight > 0f) ? _data.currentHeadHeight
+                    : ((_data.targetHeadHeight  > 0f) ? _data.targetHeadHeight  : 1.8f);
+            float feetY  = _data.isGrounded ? _data.groundPos.y : origin.y - Mathf.Max(_data.targetHeadHeight * 0.5f, 0.7f);
+            float headY  = feetY + headH;
             float chestY = Mathf.Lerp(feetY, headY, _data.isCrouching ? 0.54f : 0.60f);
 
+            // Horizontal facing only.
             Vector3 dir = new Vector3(moveDir.x, 0f, moveDir.z).normalized;
 
-            // Try ray from head, then chest.
-            if (Physics.Raycast(new Vector3(origin.x, headY,   origin.z), dir, out var hit, WALL_MAX_RANGE, _terrainMask, QueryTriggerInteraction.Ignore) ||
-                Physics.Raycast(new Vector3(origin.x, chestY,  origin.z), dir, out hit,    WALL_MAX_RANGE, _terrainMask, QueryTriggerInteraction.Ignore))
+            // Try ray from head, then chest (matches how a player would look).
+            RaycastHit hit;
+            Vector3 headPos  = new Vector3(origin.x, headY,  origin.z);
+            Vector3 chestPos = new Vector3(origin.x, chestY, origin.z);
+
+            if (Physics.Raycast(headPos,  dir, out hit, WALL_MAX_RANGE, _terrainMask, QueryTriggerInteraction.Ignore) ||
+                Physics.Raycast(chestPos, dir, out hit, WALL_MAX_RANGE, _terrainMask, QueryTriggerInteraction.Ignore))
             {
-                // Match the game's acceptance: slight underhangs and moderate overhangs are ok
-                float climbAngle = Vector3.Angle(hit.normal, Vector3.up); // 0=flat up, 90=vertical
-                bool acceptable  = AcceptableGrabAngle(climbAngle);
+                // Angle relative to up. 0° = flat ground, 90° = vertical, >90° = overhang.
+                float climbAngle = Vector3.Angle(hit.normal, Vector3.up);
 
-                // Must also be close enough in the plane
+                // Mirror CharacterClimbing.AcceptableGrabAngle (without surface overrides):
+                // Underhang allowed down to ~50°, overhang up to ~170°.
+                bool acceptableAngle = (climbAngle >= 50f && climbAngle <= 170f);
+
+                // Planar distance from our vertical to the contact point; keep attach reach tight.
                 float planar = Vector3.ProjectOnPlane(hit.point - new Vector3(origin.x, hit.point.y, origin.z), Vector3.up).magnitude;
-                bool withinReach = planar <= 0.8f; // tighter than cast range
+                bool withinReach = planar <= 0.8f;
 
-                bool canAttach = acceptable && withinReach;
+                // Keep your original "steep" notion for info (threshold via normal.y).
+                bool steep = hit.normal.y <= WALL_STEEP_Y;
 
                 return new WallAttachInfo
                 {
-                    IsSteep   = climbAngle >= 70f,   // informational
-                    CanAttach = canAttach,
-                    PlanarDist= planar,
-                    Normal    = hit.normal,
-                    AngleDeg  = climbAngle
+                    IsSteep    = steep,
+                    CanAttach  = acceptableAngle && withinReach,
+                    PlanarDist = planar,
+                    Normal     = hit.normal,
+                    AngleDeg   = climbAngle
                 };
             }
 
@@ -266,17 +274,6 @@ namespace Peak.BotClone
                 : float.PositiveInfinity;
 
             return _cachedDetourRatio;
-        }
-        // Perception/Perception.cs (inside the Perception class)
-
-        private static bool AcceptableGrabAngle(float climbAngleDeg)
-        {
-            // Mirrors CharacterClimbing.AcceptableGrabAngle:
-            // Overhang (angle > 90): allow up to ~80° past vertical → angle <= 170
-            // Underhang (angle < 90): allow down to ~50° from vertical → angle >= 50
-            float f = climbAngleDeg - 90f;
-            if (f > 0f)  return Mathf.Abs(f) <= 80f;  // up to 170°
-            else         return Mathf.Abs(f) <= 40f;  // down to 50°
         }
 
     }
