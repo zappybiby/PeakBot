@@ -24,7 +24,7 @@ namespace Peak.BotClone
         // Runtime logging (no editor defines)
         // ---------------------------------------------------------------------
         // Flip to true if you want verbose logs in release/runtime builds.
-        private const bool VERBOSE_LOGS = false;
+        private static readonly bool VERBOSE_LOGS = false;
 
         // ---------------------------------------------------------------------
         // References (assigned in Awake/Init)
@@ -82,8 +82,6 @@ namespace Peak.BotClone
         // Runtime state
         // ---------------------------------------------------------------------
         private bool resting; // True while intentionally idling to regen.
-        private float nextWallAttempt;
-        private float attachFailDelay = 1f; // Doubles each fail, resets on success (1→2→4 s).
 
         private static readonly MethodInfo? MI_TryClimb = typeof(CharacterClimbing)
             .GetMethod("TryClimb", BindingFlags.Instance | BindingFlags.NonPublic);
@@ -96,7 +94,6 @@ namespace Peak.BotClone
         private Vector3 lastPos;
         private float stuckTime;
         private int terrainMask;
-        private float nextLedgeAttempt;
 
         internal void Init(Character target, float sprintDist, BotCloneSettings? s = null)
         {
@@ -110,6 +107,9 @@ namespace Peak.BotClone
             nextSprintToggle = 0f;
 
             // Ensure the brain uses the same thresholds.
+            DecisionTrace.Enabled = true;          // set false in release if you want
+            DecisionTrace.Period  = 0.25f;         // throttle (seconds)
+
             EnsureBrain();
         }
 
@@ -213,6 +213,8 @@ namespace Peak.BotClone
             var bb  = BuildBlackboard(navDir);
             var dec = _brain.Evaluate(bb, currentlySprinting: bot.IsSprinting);
             ApplyDecision(bb, dec, ref resting);
+            RunAction(dec, bb);
+            DecisionTrace.MaybeLog(bb, dec);
 
             // Baseline forward input (or zero if resting).
             ch.input.movementInput = resting ? Vector2.zero : Vector2.up;

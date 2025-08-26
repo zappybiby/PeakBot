@@ -2,7 +2,8 @@
 // -----------------------------------------------------------------------------
 // Detour/heuristic estimation utilities for GraphFollower. Provides an
 // approximate path length through the NavPoint graph using A* with a binary
-// heap, capped by MAX_NAV_EVAL_NODES.
+// heap, capped by MAX_NAV_EVAL_NODES. Exposed as `internal` so Perception can
+// use it as a fallback when NavMesh.CalculatePath is unavailable.
 // -----------------------------------------------------------------------------
 
 using System;
@@ -15,8 +16,9 @@ namespace Peak.BotClone
     {
         /// <summary>
         /// Returns an approximate path length through the NavPoint graph using A*.
+        /// Includes a direct distance tail from the final node to the target world `to`.
         /// </summary>
-        private float EstimateNavDistance(Vector3 from, Vector3 to)
+        internal float EstimateNavDistance(Vector3 from, Vector3 to)
         {
             if (allNodes.Count == 0) return Mathf.Infinity;
 

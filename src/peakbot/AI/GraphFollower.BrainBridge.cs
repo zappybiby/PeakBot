@@ -6,47 +6,53 @@ namespace Peak.BotClone
     internal partial class GraphFollower
     {
         private BotBrain _brain = null!;
+        private Perception _perception = null!;
 
-        // Call once after sprint hysteresis is set in Init(...)
         private void EnsureBrain()
         {
             if (_brain != null) return;
             _brain = new BotBrain(
-                restFrac:   STAM_REST_FRAC,
-                sprintFrac: STAM_SPRINT_FRAC,
+                restFrac:    STAM_REST_FRAC,
+                sprintFrac:  STAM_SPRINT_FRAC,
                 sprintEnter: sprintEnterDist,
-                sprintExit:  sprintExitDist
+                sprintExit:  sprintExitDist,
+                climbFrac:   STAM_CLIMB_FRAC,
+                attachAbs:   STAM_ATTACH_ABS,
+                detourFactor: DETOUR_FACTOR
+            );
+            EnsurePerception();
+        }
+
+        private void EnsurePerception()
+        {
+            if (_perception != null) return;
+            _perception = new Perception(
+                gf: this,
+                ch: ch,
+                data: data,
+                player: player,
+                bot: bot,
+                ledgeRadius: LEDGE_RADIUS,
+                ledgeHeight: LEDGE_HEIGHT,
+                ledgeMaxDist: LEDGE_MAX_DIST,
+                terrainMask: terrainMask
             );
         }
 
-        /// <summary>Builds the Blackboard from current runtime state.</summary>
         private Blackboard BuildBlackboard(Vector3 navDir)
         {
-            return BlackboardUtil.Build(
-                navDir,
-                ch,
-                player,
-                data,
-                bot,
-                staminaAbs:  Regular(),
-                staminaFrac: RegularFrac()
-            );
+            EnsurePerception();
+            return _perception.BuildBlackboard(navDir);
         }
 
-        /// <summary>
-        /// Applies the minimal decision (Rest/Sprint/Follow) by only touching the
-        /// existing 'resting' flag and the sprint toggle. Movement/steering stays as-is.
-        /// </summary>
         private void ApplyDecision(in Blackboard bb, in BotDecision d, ref bool restingFlag)
         {
-            // Respect your existing sprint toggle cooldown.
             bool canToggleSprint = Time.time >= nextSprintToggle;
 
             switch (d.Type)
             {
                 case BotActionType.Rest:
                     restingFlag = true;
-
                     if (bot.IsSprinting && canToggleSprint)
                     {
                         bot.IsSprinting  = false;
@@ -56,7 +62,6 @@ namespace Peak.BotClone
 
                 case BotActionType.Sprint:
                     restingFlag = false;
-
                     if (!bot.IsSprinting && canToggleSprint)
                     {
                         bot.IsSprinting  = true;
@@ -64,11 +69,9 @@ namespace Peak.BotClone
                     }
                     break;
 
-                default: // Follow
+                default: // Follow / Hop / WallAttach / GapJump (actuation comes later)
                     restingFlag = false;
 
-                    // If sprint is on but exit conditions are implied by the brain's Why,
-                    // safely turn it off (cooldown respected).
                     if (bot.IsSprinting)
                     {
                         bool shouldExit = (bb.DistToPlayer <= sprintExitDist) ||
