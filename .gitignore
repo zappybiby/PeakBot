@@ -243,3 +243,4 @@ Desktop.ini
 
 peakbot/.rooignore
 *.ps1
+/peakbot/artifacts
