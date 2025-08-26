@@ -58,15 +58,15 @@ namespace Peak.BotClone
 
         private float sprintRadius; // Distance threshold from Init().
         private float sprintEnterDist; // When to start sprinting (from Init).
-        private float sprintExitDist; // Lower than enter → hysteresis.
+        private float sprintExitDist;  // Lower than enter → hysteresis.
         private float nextSprintToggle; // Debounce sprint toggles.
 
-        private int   LEDGE_CASTS   => settings?.ledgeCasts   ?? 60;
-        private float LEDGE_RADIUS  => settings?.ledgeRadius  ?? 1.0f;
-        private float LEDGE_HEIGHT  => settings?.ledgeHeight  ?? 1.5f;
-        private float LEDGE_MAX_DIST=> settings?.ledgeMaxDist ?? 4f;
+        private int   LEDGE_CASTS    => settings?.ledgeCasts   ?? 60;
+        private float LEDGE_RADIUS   => settings?.ledgeRadius  ?? 1.0f;
+        private float LEDGE_HEIGHT   => settings?.ledgeHeight  ?? 1.5f;
+        private float LEDGE_MAX_DIST => settings?.ledgeMaxDist ?? 4f;
 
-        private float DESPAWN_DIST  => settings?.despawnDistance ?? 100f;
+        private float DESPAWN_DIST   => settings?.despawnDistance ?? 100f;
 
         // Threshold semantics (regular-only mindset):
         private float STAM_REST_FRAC   => settings?.stamRest   ?? 0.30f;
@@ -108,6 +108,9 @@ namespace Peak.BotClone
             sprintEnterDist = sprintDist;
             sprintExitDist  = sprintDist * 0.7f;
             nextSprintToggle = 0f;
+
+            // Ensure the brain uses the same thresholds.
+            EnsureBrain();
         }
 
         private void Awake()
@@ -205,50 +208,14 @@ namespace Peak.BotClone
             // Handle movement, climbing, gaps, etc.
             HandleMovement(navDir);
 
+            // --- Brain skeleton: decide Rest/Sprint/Follow, then set baseline input.
+            EnsureBrain();
+            var bb  = BuildBlackboard(navDir);
+            var dec = _brain.Evaluate(bb, currentlySprinting: bot.IsSprinting);
+            ApplyDecision(bb, dec, ref resting);
+
             // Baseline forward input (or zero if resting).
             ch.input.movementInput = resting ? Vector2.zero : Vector2.up;
-
-            // Stamina State Machine (regular-only).
-            if (resting)
-            {
-                if (RegularFrac() >= (STAM_REST_FRAC + 0.10f))
-                    resting = false;
-            }
-            else if (RegularFrac() <= STAM_REST_FRAC)
-            {
-                resting = true;
-            }
-
-            // Sprint gating: only when not resting, not climbing, and regular bar healthy enough.
-            bool  sprinting     = bot.IsSprinting;
-            float distToPlayer  = Vector3.Distance(ch.Center, player.Center);
-            bool  canToggle     = Time.time >= nextSprintToggle;
-            bool  lowRegular    = RegularFrac() < STAM_SPRINT_FRAC;
-
-            if (resting || lowRegular || data.isClimbing)
-            {
-                if (sprinting && canToggle)
-                {
-                    bot.IsSprinting  = false;
-                    nextSprintToggle = Time.time + 0.25f;
-                }
-            }
-            else
-            {
-                bool wantSprint = navDir.sqrMagnitude > 1e-4f && distToPlayer >= sprintEnterDist && !lowRegular;
-                bool stopSprint = distToPlayer <= sprintExitDist;
-
-                if (!sprinting && wantSprint && canToggle)
-                {
-                    bot.IsSprinting  = true;
-                    nextSprintToggle = Time.time + 0.25f;
-                }
-                else if (sprinting && stopSprint && canToggle)
-                {
-                    bot.IsSprinting  = false;
-                    nextSprintToggle = Time.time + 0.25f;
-                }
-            }
 
             bot.LookDirection = navDir;
 
