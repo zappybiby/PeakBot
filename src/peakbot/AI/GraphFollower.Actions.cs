@@ -14,13 +14,12 @@ namespace Peak.BotClone
         {
             switch (d.Type)
             {
-                case BotActionType.Hop:        TryHop(bb);       break;
-                case BotActionType.GapJump:    TryGapJump(bb);   break;
-                case BotActionType.WallAttach: TryWallAttach(bb);break;
+                case BotActionType.Hop:        TryHop(bb);        break;
+                case BotActionType.GapJump:    TryGapJump(bb);    break;
+                case BotActionType.WallAttach: TryWallAttach(bb); break;
                 default: break; // Follow/Sprint/Rest handled elsewhere
             }
         }
-
 
         private void TryHop(in Blackboard bb)
         {
@@ -61,9 +60,27 @@ namespace Peak.BotClone
             MI_TryClimb?.Invoke(ch.refs.climbing, null);
         }
 
+        /// <summary>
+        /// Mirror CharacterMovement.TryToJump gating so we don't force illegal jumps via RPC.
+        /// </summary>
+        private bool CanIssueJumpNow()
+        {
+            // Same conditions the game enforces before calling JumpRpc:
+            if (ch.data.jumpsRemaining <= 0) return false; // no jumps left
+            if (!ch.CheckJump())            return false;   // not allowed (climbing/rope/vine/handle/etc.)
+            if (ch.data.sinceGrounded > 0.20f) return false; // been airborne too long
+            if (ch.data.sinceJump < 0.30f)     return false; // debounce jump spam
+            if (ch.data.chargingJump)          return false; // mid-charge
+
+            return true;
+        }
+
         private void SendJumpRpc()
         {
             // Jump input is network-synced via RPC in this game; avoid raw input flags.
+            // IMPORTANT: Only issue if it would pass the game's own TryToJump checks.
+            if (!CanIssueJumpNow()) return;
+
             if (ch.refs.view != null && ch.refs.view.IsMine)
                 ch.refs.view.RPC("JumpRpc", RpcTarget.All, false);
         }

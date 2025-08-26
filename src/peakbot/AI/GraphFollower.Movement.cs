@@ -1,5 +1,5 @@
 // /AI/GraphFollower.Movement.cs
-// Slim locomotion shim. All action decisions (hop/attach/gap) are owned by BotBrain.
+// Slim locomotion shim. All action decisions (hop/attach/gap/strafe) are owned by BotBrain.
 
 using UnityEngine;
 
@@ -7,12 +7,28 @@ namespace Peak.BotClone
 {
     internal partial class GraphFollower
     {
-        // Legacy HandleMovement used to hop/attach/jump directly.
-        // Now the brain owns that. Keep a no-op to preserve call sites.
-        private void HandleMovement(Vector3 moveDir)
+        private float _strafeBlend = 0f;
+        private const float STRAFE_MAX   = 0.8f; // safety clamp
+        private const float STRAFE_ACCEL = 6f;   // into a strafe
+        private const float STRAFE_DECEL = 8f;   // back to zero
+
+        /// <summary>
+        /// Actuate a brain-provided strafe hint. No world/Blackboard reads here.
+        /// </summary>
+        private Vector2 HandleMovement(float targetStrafe, bool resting)
         {
-            // Intentionally empty. Movement input is applied in Core after the brain runs.
-            // Keep this if you later want to add purely kinematic helpers (no jumps here).
+            if (resting)
+            {
+                _strafeBlend = Mathf.MoveTowards(_strafeBlend, 0f, STRAFE_DECEL * Time.deltaTime);
+                return Vector2.zero;
+            }
+
+            float accel = (Mathf.Abs(targetStrafe) > Mathf.Abs(_strafeBlend)) ? STRAFE_ACCEL : STRAFE_DECEL;
+            _strafeBlend = Mathf.MoveTowards(_strafeBlend, targetStrafe, accel * Time.deltaTime);
+            _strafeBlend = Mathf.Clamp(_strafeBlend, -STRAFE_MAX, STRAFE_MAX);
+
+            // x = strafe, y = forward
+            return new Vector2(_strafeBlend, 1f);
         }
 
         internal static Vector2 DirToLook(Vector3 dir)

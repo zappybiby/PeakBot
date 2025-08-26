@@ -205,9 +205,6 @@ namespace Peak.BotClone
             // Face movement direction.
             data.lookValues = DirToLook(navDir);
 
-            // Handle movement, climbing, gaps, etc.
-            HandleMovement(navDir);
-
             // --- Brain skeleton: decide Rest/Sprint/Follow, then set baseline input.
             EnsureBrain();
             var bb  = BuildBlackboard(navDir);
@@ -215,10 +212,8 @@ namespace Peak.BotClone
             ApplyDecision(bb, dec, ref resting);
             RunAction(dec, bb);
             DecisionTrace.MaybeLog(bb, dec);
-
             // Baseline forward input (or zero if resting).
-            ch.input.movementInput = resting ? Vector2.zero : Vector2.up;
-
+            ch.input.movementInput = HandleMovement(resting ? 0f : dec.Strafe, resting);
             bot.LookDirection = navDir;
 
             // Stuck detection / auto-climb poke.

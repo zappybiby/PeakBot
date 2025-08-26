@@ -6,13 +6,16 @@ namespace Peak.BotClone
 {
     internal enum BotActionType { Follow, Sprint, Rest, Hop, WallAttach, GapJump }
 
+    // AI/Decision/BotBrain.cs  (add field)
     internal sealed class BotDecision
     {
         public BotActionType Type;
         public string Why = "";
         public Dictionary<string, float>? Scores;
         public Vector3? Target; // e.g., GapJump landing
+        public float Strafe;
     }
+
 
     internal sealed class BotBrain
     {
@@ -101,6 +104,7 @@ namespace Peak.BotClone
             var (bestName, bestScore) = Max(scores);
 
             var d = new BotDecision { Scores = scores };
+            // AI/Decision/BotBrain.cs  (inside Evaluate, after switch(bestName))
             switch (bestName)
             {
                 case "Rest":
@@ -135,8 +139,17 @@ namespace Peak.BotClone
                 default:
                     d.Type = BotActionType.Follow;
                     d.Why  = "default follow";
+
+                    // NEW: only the brain decides to strafe; movement layer just executes it smoothly.
+                    if (bb.IsGrounded && !bb.IsClimbing && bb.Step.CanHop &&
+                        (bb.Step.LateralAgree == -1 || bb.Step.LateralAgree == 1))
+                    {
+                        // modest nudge; actuator will smooth & clamp
+                        d.Strafe = Mathf.Sign(bb.Step.LateralAgree) * 0.6f;
+                    }
                     break;
             }
+
 
             return d;
         }
