@@ -191,14 +191,16 @@ namespace Peak.BotClone
             if (data.isClimbing && (RegularFrac() < STAM_CLIMB_FRAC || data.sinceClimb > HangCap()))
                 ch.refs.climbing.StopClimbing();
 
-            // 1) NavMesh steering (primary)
-            Vector3 navDir = ComputeNavMeshDirection();
+            // Decide steering source once 
+            var agent = bot.navigator?.agent;
+            bool navComplete = agent && agent.isOnNavMesh && agent.hasPath && agent.pathStatus == NavMeshPathStatus.PathComplete;
 
-            // 2) Graph fallback only if NavMesh path really isn’t usable.
-            if (NeedsGraphFallback())
-                navDir = ComputeGraphDirection(navDir);
+            Vector3 navDir = navComplete
+                ? ComputeNavMeshDirection()
+                // don’t preserve previous when graph has no target
+                : ComputeGraphDirection(Vector3.zero); 
 
-            // 3) Direct fallback (straight line)
+            // Direct fallback (straight line) if both failed
             if (navDir == Vector3.zero)
                 navDir = (player.Center - ch.Center).normalized;
 
@@ -207,7 +209,7 @@ namespace Peak.BotClone
 
             // --- Brain skeleton: decide Rest/Sprint/Follow, then set baseline input.
             EnsureBrain();
-            var bb  = BuildBlackboard(navDir);
+            var bb = BuildBlackboard(navDir);
             var dec = _brain.Evaluate(bb, currentlySprinting: bot.IsSprinting);
             ApplyDecision(bb, dec, ref resting);
             RunAction(dec, bb);
@@ -229,19 +231,13 @@ namespace Peak.BotClone
                 if (VERBOSE_LOGS) Debug.LogWarning($"[AI] Stuck for {stuckTime:F1}s. Nudging a climb.");
                 // Poke a climb in case we're blocked by a knee-high ledge.
                 MI_TryClimb?.Invoke(ch.refs.climbing, null);
-                current   = null; // Reset NavPoint path.
+                current = null; // Reset NavPoint path.
                 stuckTime = 0f;
             }
 
             // Regen correctness while resting.
-            if (resting)
-            {
-                bot.IsSprinting = false;
-                ch.input.movementInput = Vector2.zero;
-
-                if (data.currentClimbHandle == null && data.isClimbing)
-                    ch.refs.climbing.StopClimbing();
-            }
+            if (resting && data.currentClimbHandle == null && data.isClimbing)
+                ch.refs.climbing.StopClimbing();
         }
 
         /// <summary>

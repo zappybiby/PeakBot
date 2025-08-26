@@ -18,28 +18,35 @@ namespace Peak.BotClone
         // cos(90°)  =  0.0   → forward cone
         // cos(135°) = -0.707 → wider cone allowing lateral/backward
         private const float CONE_TIGHT_DOT = 0f;
-        private const float CONE_WIDE_DOT = -0.70710678f;
+        private const float CONE_WIDE_DOT  = -0.70710678f;
 
         // Greedy scoring weights
-        private const float W_ALIGN = 0.6f;   // alignment with vector to player
-        private const float W_DIST = 0.3f;    // relative distance improvement to player
-        private const float W_SMOOTH = 0.1f;  // heading continuity vs last step
-        private const float TIE_NOISE = 0.01f; // small randomness to break ties
+        private const float W_ALIGN  = 0.6f;   // alignment with vector to player
+        private const float W_DIST   = 0.3f;   // relative distance improvement to player
+        private const float W_SMOOTH = 0.1f;   // heading continuity vs last step
+        private const float TIE_NOISE = 0.01f;
 
-        // Heuristics for graph neighbor selection ...
-        private static readonly bool LOG_NAVMESH_FALLBACK = false;          // ← default OFF
-        private const bool LOG_FALLBACK_TRANSITIONS_ONLY = true;   // only log when status changes
-        private const float NAVMESH_FALLBACK_LOG_PERIOD = 5f;      // if not transitions-only, min seconds between logs
+        // Optional logging controls
+        private static readonly bool LOG_NAVMESH_FALLBACK = false;
+        private const bool  LOG_FALLBACK_TRANSITIONS_ONLY = true;
+        private const float NAVMESH_FALLBACK_LOG_PERIOD   = 5f;
 
+        // Tiered cone policy: tight → wide → any (allow backtrack on final pass)
+        private static readonly (float minDot, bool avoidBacktrack)[] CONE_TIERS = new[]
+        {
+            (CONE_TIGHT_DOT, true),
+            (CONE_WIDE_DOT,  true),
+            (-1f,            false),
+        };
 
         // State to discourage immediate backtrack and promote smooth motion
         private NavPoint? previousNode;
-        private Vector3 lastGraphStep;
+        private Vector3   lastGraphStep;
 
         // Log throttling during fallback churn
         private NavMeshPathStatus? _lastPathStatusForLog;
-        private bool _lastHasPathForLog;
-        private float _nextFallbackLogAt;
+        private bool   _lastHasPathForLog;
+        private float  _nextFallbackLogAt;
 
         // ---------------------------------------------------------------------
         // NavMesh steering (primary)
@@ -50,14 +57,12 @@ namespace Peak.BotClone
             var agent = bot.navigator?.agent;
             if (agent != null && agent.isOnNavMesh)
             {
-                // Request a new path when refresh elapses or if no path exists.
                 if (Time.time >= nextPathTime || !agent.hasPath)
                 {
                     bot.targetPos_Set = player.Center;
                     nextPathTime = Time.time + pathRefresh;
                 }
 
-                // Once a path exists, steer toward the next waypoint.
                 if (!agent.pathPending && agent.hasPath)
                     navDir = (agent.steeringTarget - ch.Center).normalized;
             }
@@ -72,7 +77,6 @@ namespace Peak.BotClone
                 if (agent.hasPath && agent.pathStatus == NavMeshPathStatus.PathComplete)
                     return false;
 
-                // Only log when enabled
                 if (LOG_NAVMESH_FALLBACK)
                 {
                     bool statusChanged = (_lastPathStatusForLog != agent.pathStatus) || (_lastHasPathForLog != agent.hasPath);
@@ -81,9 +85,9 @@ namespace Peak.BotClone
                     if ((LOG_FALLBACK_TRANSITIONS_ONLY && statusChanged) ||
                         (!LOG_FALLBACK_TRANSITIONS_ONLY && (statusChanged || timeOk)))
                     {
-        #if UNITY_EDITOR
+#if UNITY_EDITOR
                         Debug.LogWarning($"[GraphFollower] NavMesh pathStatus={agent.pathStatus}, hasPath={agent.hasPath}. Falling back to graph");
-        #endif
+#endif
                         _lastPathStatusForLog = agent.pathStatus;
                         _lastHasPathForLog = agent.hasPath;
                         _nextFallbackLogAt = Time.time + NAVMESH_FALLBACK_LOG_PERIOD;
@@ -92,7 +96,6 @@ namespace Peak.BotClone
             }
             return true;
         }
-
 
         // ---------------------------------------------------------------------
         // Graph steering (fallback when NavMesh path isn't complete)
@@ -104,23 +107,21 @@ namespace Peak.BotClone
             if (current == null)
                 current = PickStartNode();
 
-            // Step to the next node once the current is reached.
             if (current && Vector3.Distance(ch.Center, current.transform.position) < NODE_REACH)
             {
-                var from = current; // UnityEngine.Object null semantics are intentional
+                var from = current;
                 var next = (from != null) ? PickNextNode(from) : null;
                 if (next != null && from != null)
                 {
                     previousNode = from;
                     lastGraphStep = (next.transform.position - from.transform.position).normalized;
                 }
-                current = next; // 'current' is NavPoint?
+                current = next;
             }
 
             if (current)
                 return (current.transform.position - ch.Center).normalized;
 
-            // No graph target: preserve prior input (caller may use straight-line fallback).
             return currentDir;
         }
 
@@ -129,45 +130,40 @@ namespace Peak.BotClone
         // ---------------------------------------------------------------------
         private NavPoint? PickStartNode()
         {
-            // Nearest node with tiered preference toward the player:
-            // 1) tight cone (≥ 0), 2) wide cone (≥ -0.707), 3) any.
-            var origin = ch.Center;
-            var toPlayer = (player.Center - origin);
-            var toPlayerLen = toPlayer.magnitude;
+            var origin       = ch.Center;
+            var toPlayer     = (player.Center - origin);
+            var toPlayerLen  = toPlayer.magnitude;
             var toPlayerNorm = toPlayerLen > 1e-4f ? (toPlayer / toPlayerLen) : Vector3.forward;
 
-            NavPoint? best = null;
-            float bestDist = float.MaxValue;
-
-            // Scan using a minimum dot threshold (optional)
-            void Scan(float minDot, bool useDot)
+            for (int tier = 0; tier < CONE_TIERS.Length; tier++)
             {
+                var (minDot, avoidBacktrack) = CONE_TIERS[tier];
+
+                NavPoint? best = null;
+                float bestD2 = float.PositiveInfinity;
+
                 for (int i = 0; i < allNodes.Count; i++)
                 {
                     var n = allNodes[i];
+                    if (!n) continue;
+
+                    if (avoidBacktrack && previousNode != null && n == previousNode)
+                        continue;
+
                     var vec = n.transform.position - origin;
-                    var d = vec.magnitude;
-                    if (d < bestDist)
-                    {
-                        if (useDot)
-                        {
-                            float dot = Vector3.Dot(toPlayerNorm, vec.normalized);
-                            if (dot < minDot) continue;
-                        }
-                        best = n; bestDist = d;
-                    }
+                    float d2 = vec.sqrMagnitude;
+                    if (d2 < 1e-6f) continue;
+
+                    float dot = Vector3.Dot(toPlayerNorm, vec / Mathf.Sqrt(d2));
+                    if (minDot > -1f && dot < minDot) continue;
+
+                    if (d2 < bestD2) { bestD2 = d2; best = n; }
                 }
+
+                if (best != null) return best;
             }
 
-            // Tight cone → wide cone → any
-            Scan(CONE_TIGHT_DOT, true);
-            if (best != null) return best;
-
-            Scan(CONE_WIDE_DOT, true);
-            if (best != null) return best;
-
-            Scan(0f, false);
-            return best; // may be null if no nodes exist
+            return null;
         }
 
         private NavPoint? PickNextNode(NavPoint from)
@@ -175,25 +171,15 @@ namespace Peak.BotClone
             if (from == null || from.connections == null || from.connections.Count == 0)
                 return null;
 
-            var fromPos = from.transform.position;
-            var toPlayer = player.Center - fromPos;
-            var toPlayerLen = toPlayer.magnitude;
+            var fromPos      = from.transform.position;
+            var toPlayer     = player.Center - fromPos;
+            var toPlayerLen  = toPlayer.magnitude;
             var toPlayerNorm = toPlayerLen > 1e-4f ? (toPlayer / toPlayerLen) : Vector3.forward;
 
-            // Build candidates with tiered cones:
-            // 1) tight (forward-ish), avoiding immediate backtrack
-            // 2) wide
-            // 3) any (allow backtrack as last resort)
-            var candidates = BuildCandidates(from, toPlayerNorm, CONE_TIGHT_DOT, avoidBacktrack: true);
-            if (candidates.Count == 0)
-                candidates = BuildCandidates(from, toPlayerNorm, CONE_WIDE_DOT, avoidBacktrack: true);
-            if (candidates.Count == 0)
-                candidates = BuildCandidates(from, toPlayerNorm, minDot: -1f, avoidBacktrack: false);
-
+            var candidates = TieredNeighbors(from, toPlayerNorm);
             if (candidates.Count == 0)
                 return null;
 
-            // Greedy score: alignment + distance improvement + smoothness
             float fromToPlayer = toPlayerLen;
             float bestScore = float.NegativeInfinity;
             NavPoint? best = null;
@@ -201,6 +187,8 @@ namespace Peak.BotClone
             for (int i = 0; i < candidates.Count; i++)
             {
                 var n = candidates[i];
+                if (!n) continue;
+
                 var nPos = n.transform.position;
                 var step = nPos - fromPos;
                 float len = step.magnitude;
@@ -208,17 +196,14 @@ namespace Peak.BotClone
 
                 var stepNorm = step / len;
 
-                // 1) Alignment [0..1]
-                float alignDot = Vector3.Dot(toPlayerNorm, stepNorm);
+                float alignDot   = Vector3.Dot(toPlayerNorm, stepNorm);
                 float alignScore = Mathf.Max(0f, alignDot);
 
-                // 2) Relative distance improvement [-1..1]
                 float dImprovement = fromToPlayer - Vector3.Distance(nPos, player.Center);
                 float distScore = (fromToPlayer > 1e-3f)
                     ? Mathf.Clamp(dImprovement / fromToPlayer, -1f, 1f)
                     : 0f;
 
-                // 3) Smoothness [0..1]
                 float smoothScore = (lastGraphStep.sqrMagnitude > 1e-4f)
                     ? Mathf.Max(0f, Vector3.Dot(lastGraphStep, stepNorm))
                     : 0.5f;
@@ -226,7 +211,6 @@ namespace Peak.BotClone
                 float score = W_ALIGN * alignScore + W_DIST * distScore + W_SMOOTH * smoothScore;
                 score += UnityEngine.Random.value * TIE_NOISE;
 
-                // Small penalty if backtracking is among the final-stage options
                 if (previousNode != null && n == previousNode)
                     score -= 0.25f;
 
@@ -240,11 +224,17 @@ namespace Peak.BotClone
             return best;
         }
 
-        /// <summary>
-        /// Build neighbor candidates with a minimum dot-to-player threshold.
-        /// Optionally avoids immediate backtrack; if 'avoidBacktrack' is false and
-        /// the result is empty with minDot = -1, allow previousNode as a last resort.
-        /// </summary>
+        private List<NavPoint> TieredNeighbors(NavPoint from, Vector3 toPlayerNorm)
+        {
+            for (int i = 0; i < CONE_TIERS.Length; i++)
+            {
+                var (minDot, avoid) = CONE_TIERS[i];
+                var list = BuildCandidates(from, toPlayerNorm, minDot, avoid);
+                if (list.Count > 0) return list;
+            }
+            return new List<NavPoint>(0);
+        }
+
         private List<NavPoint> BuildCandidates(NavPoint from, Vector3 toPlayerNorm, float minDot, bool avoidBacktrack)
         {
             var list = new List<NavPoint>(from.connections.Count);
@@ -266,8 +256,6 @@ namespace Peak.BotClone
                     list.Add(n);
             }
 
-            // If avoiding backtrack produced no options and this is the final fallback,
-            // include previousNode when connected.
             if (list.Count == 0 && !avoidBacktrack && previousNode != null)
             {
                 for (int i = 0; i < from.connections.Count; i++)
@@ -276,12 +264,6 @@ namespace Peak.BotClone
             }
 
             return list;
-        }
-
-        // Retained for compatibility; current logic uses dot products directly.
-        private static float VectorBoxAngle(Vector3 a, Vector3 b)
-        {
-            return Vector3.Angle(a, b);
         }
     }
 }
