@@ -1,0 +1,52 @@
+# === Build outputs & caches ===
+artifacts/
+**/bin/
+**/obj/
+**/Debug/
+**/Release/
+**/publicized/
+**/project.assets.json
+**/project.nuget.cache
+**/*.cache
+**/*.md5
+**/*.log
+**/*.tmp
+
+# === Thunderstore packaging ===
+artifacts/thunderstore/
+src/peakbot/thunderstore.toml
+**/*.zip
+
+# === Binaries ===
+**/*.dll
+**/*.pdb
+**/*.exe
+**/*.deps.json
+**/*.nupkg
+
+# === Editor/IDE cruft ===
+.vs/
+.vscode/
+.config/
+.git/
+
+# === Non-code assets & docs ===
+**/*.png
+**/*.jpg
+**/*.jpeg
+**/*.gif
+**/*.ico
+**/*.svg
+**/*.pdf
+README.md
+CHANGELOG.md
+LICENSE
+
+# === Build/setup files (keep edits focused on code) ===
+*.sln
+*.csproj
+*.props
+*.targets
+Directory.Build.props
+Directory.Build.targets
+Config.Build.user.props
