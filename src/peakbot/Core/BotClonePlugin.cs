@@ -1,7 +1,4 @@
 // /Core/BotClonePlugin.cs
-// Bootstraps runtime NavMesh + NavPoints generation. Builds only the
-// “biome slice” between the two campfires bracketing the player.
-
 using System.Collections;
 using BepInEx;
 using Photon.Pun;
@@ -14,33 +11,39 @@ namespace Peak.BotClone
     {
         [SerializeField] private Peak.BotClone.Config.BotCloneSettings? settings = null;
 
-        // Slice params (tune to taste)
+        // Slice configuration
         private const CampfireSegmentation.SliceMode SLICE_MODE = CampfireSegmentation.SliceMode.StrictBetween;
-        private const float SLICE_AXIS_PAD  = 20f;  // small safety past the cut lines
-        private const float SLICE_Y_PAD_DN  = 10f;
-        private const float SLICE_Y_PAD_UP  = 15f;
+        private const float SLICE_AXIS_PAD = 20f;
+        private const float SLICE_Y_PAD_DN = 10f;
+        private const float SLICE_Y_PAD_UP = 15f;
 
-
-        // Recenter checks
-        private const float WATCH_INTERVAL = 2.0f;            // seconds
-        private const float RECENTER_EDGE_FRACTION = 0.15f;   // near-edge threshold
-
-        // State for the watcher
-        private Bounds? _currentSlice;
-        private string _curSegA = "?";
-        private string _curSegB = "?";
+        private bool _building;
+        private RuntimeNavMesh _runtimeNavMesh = null!;
 
         void Start()
         {
             PhotonNetwork.AddCallbackTarget(this);
-            StartCoroutine(Bootstrap());
         }
 
-        void OnDestroy() => PhotonNetwork.RemoveCallbackTarget(this);
-
-        IEnumerator Bootstrap()
+        void OnDestroy()
         {
-            Logger.LogInfo("[BotClone] Waiting for level load...");
+            PhotonNetwork.RemoveCallbackTarget(this);
+        }
+
+        void Update()
+        {
+            if (Input.GetKeyDown(KeyCode.F10) || (UnityEngine.InputSystem.Keyboard.current?.f10Key.wasPressedThisFrame ?? false))
+            {
+                if (!_building) StartCoroutine(BuildSliceAndSpawnNow());
+            }
+        }
+
+        private IEnumerator BuildSliceAndSpawnNow()
+        {
+            _building = true;
+            Logger.LogInfo("[BotClone] Building slice and spawning clone…");
+
+            // Wait until scene/player are ready
             while (!PhotonNetwork.InRoom
                    || Photon.Pun.SceneManagerHelper.ActiveSceneName == "Airport"
                    || Character.localCharacter == null
@@ -49,92 +52,69 @@ namespace Peak.BotClone
                 yield return null;
             }
 
-            Logger.LogInfo("[BotClone] Level loaded.");
-            var runtimeNavMesh = gameObject.AddComponent<RuntimeNavMesh>();
+            // Ensure RuntimeNavMesh exists
+            _runtimeNavMesh = _runtimeNavMesh ? _runtimeNavMesh : gameObject.AddComponent<RuntimeNavMesh>();
 
-            // Build the biome slice (campfire-based band of the whole map)
-            if (CampfireSegmentation.TryBuildBiomeSlice(
-                    Character.localCharacter.Center,
-                    out Bounds slice, out string segA, out string segB,
-                    SLICE_MODE, SLICE_AXIS_PAD, SLICE_Y_PAD_DN, SLICE_Y_PAD_UP))
+            // Determine slice at press time
+            var me = Character.localCharacter;
+            Bounds slice;
+            bool haveSlice = CampfireSegmentation.TryBuildBiomeSlice(
+                                me.Center,
+                                out slice, out string segA, out string segB,
+                                SLICE_MODE, SLICE_AXIS_PAD, SLICE_Y_PAD_DN, SLICE_Y_PAD_UP);
+
+            if (haveSlice)
             {
-                _currentSlice = slice; _curSegA = segA; _curSegB = segB;
-
-                Logger.LogInfo($"[BotClone] Using biome slice {segA} ↔ {segB} | center={slice.center} size={slice.size}");
-
-                yield return StartCoroutine(runtimeNavMesh.BakeNavMesh(slice));
-                Logger.LogInfo("[BotClone] NavMesh baked (bounded). Generating NavPoints…");
+                Logger.LogInfo($"[BotClone] Slice {segA} ↔ {segB} | center={slice.center} size={slice.size}");
+                yield return StartCoroutine(_runtimeNavMesh.BakeNavMesh(slice));
+                Logger.LogInfo("[BotClone] Generating NavPoints…");
                 yield return StartCoroutine(RuntimeNavPointGenerator.GenerateAsync(slice));
             }
             else
             {
-                Logger.LogWarning("[BotClone] Could not resolve campfire slice; falling back to full bake.");
-                yield return StartCoroutine(runtimeNavMesh.BakeNavMesh());
-                Logger.LogInfo("[BotClone] NavMesh baked (full). Generating NavPoints…");
+                Logger.LogWarning("[BotClone] Slice resolve failed; full bake fallback.");
+                yield return StartCoroutine(_runtimeNavMesh.BakeNavMesh());
+                Logger.LogInfo("[BotClone] Generating NavPoints (full) …");
                 yield return StartCoroutine(RuntimeNavPointGenerator.GenerateAsync());
             }
 
             PrefabCache.Cache(settings?.botPrefabName ?? "Character_Bot");
-            Logger.LogInfo("[BotClone] Initialised — press F10 to spawn clone.");
 
-            // Keep the slice centered as the player advances
-            StartCoroutine(SliceWatcher(runtimeNavMesh));
-            yield break;
+            var clone = CloneSpawner.Spawn(settings, this.Logger);
+            if (haveSlice && clone)
+                StartCoroutine(CoSliceGuard(clone, slice, me));
+
+            _building = false;
         }
 
-        void Update()
+        // Despawn if either player or bot moves outside the built slice
+        private IEnumerator CoSliceGuard(GameObject clone, Bounds slice, Character player)
         {
-            if (Input.GetKeyDown(KeyCode.F10) || (UnityEngine.InputSystem.Keyboard.current?.f10Key.wasPressedThisFrame ?? false))
-                CloneSpawner.Spawn(settings, this.Logger);
-        }
+            const float edgeGrace = 0.5f;
 
-        // -- Re-center the bake when the player crosses into a new campfire band or nears edges.
-        private IEnumerator SliceWatcher(RuntimeNavMesh nav)
-        {
-            while (true)
+            while (clone && player)
             {
-                yield return new WaitForSeconds(WATCH_INTERVAL);
-                var me = Character.localCharacter; if (!me) continue;
+                var botCh = clone.GetComponent<Character>();
+                if (!botCh) break;
 
-                if (CampfireSegmentation.TryBuildBiomeSlice(
-                        me.Center,
-                        out Bounds newSlice, out string segA, out string segB,
-                        SLICE_MODE, SLICE_AXIS_PAD, SLICE_Y_PAD_DN, SLICE_Y_PAD_UP))
+                if (!ContainsWithGrace(slice, player.Center, edgeGrace) ||
+                    !ContainsWithGrace(slice, botCh.Center, edgeGrace))
                 {
-                    bool pairChanged  = (segA != _curSegA) || (segB != _curSegB);
-                    bool playerOutside = !_currentSlice.HasValue || !_currentSlice.Value.Contains(me.Center);
-                    bool nearEdge     = _currentSlice.HasValue && IsNearEdge(_currentSlice.Value, me.Center, RECENTER_EDGE_FRACTION);
-                    bool shapeShifted = !_currentSlice.HasValue || SignificantBoundsDelta(_currentSlice.Value, newSlice);
-
-                    if (pairChanged || playerOutside || nearEdge || shapeShifted)
-                    {
-                        _currentSlice = newSlice; _curSegA = segA; _curSegB = segB;
-
-                        Logger.LogInfo($"[BotClone] Re-centering slice to {segA} ↔ {segB} | center={newSlice.center} size={newSlice.size}");
-                        yield return StartCoroutine(nav.BakeNavMesh(newSlice));
-                        yield return StartCoroutine(RuntimeNavPointGenerator.GenerateAsync(newSlice));
-                    }
+                    Logger.LogInfo("[BotClone] Out of slice — despawning.");
+                    if (PhotonNetwork.InRoom) PhotonNetwork.Destroy(clone);
+                    else Destroy(clone);
+                    yield break;
                 }
+                yield return null;
             }
         }
 
-        private static bool IsNearEdge(Bounds b, Vector3 p, float edgeFrac)
+        private static bool ContainsWithGrace(Bounds b, Vector3 p, float pad)
         {
-            Vector3 min = b.min, max = b.max;
-            float nx = Mathf.InverseLerp(min.x, max.x, p.x);
-            float nz = Mathf.InverseLerp(min.z, max.z, p.z);
-            bool nearX = nx <= edgeFrac || nx >= 1f - edgeFrac;
-            bool nearZ = nz <= edgeFrac || nz >= 1f - edgeFrac;
-            return nearX || nearZ;
-        }
-
-        private static bool SignificantBoundsDelta(Bounds a, Bounds b)
-        {
-            float centerDelta = Vector3.Distance(a.center, b.center);
-            Vector3 sizeDelta = new Vector3(Mathf.Abs(a.size.x - b.size.x),
-                                            Mathf.Abs(a.size.y - b.size.y),
-                                            Mathf.Abs(a.size.z - b.size.z));
-            return centerDelta > 25f || sizeDelta.sqrMagnitude > 25f * 25f;
+            var bb = b;
+            bb.Expand(new Vector3(-2f * pad, 0f, -2f * pad));
+            var test = new Vector3(p.x, Mathf.Clamp(p.y, bb.min.y, bb.max.y), p.z);
+            return bb.Contains(test);
         }
     }
 }
