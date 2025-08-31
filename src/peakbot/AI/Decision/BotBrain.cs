@@ -60,7 +60,7 @@ namespace Peak.BotClone
 
             // --- Hop (for small steps) ---
             float hop = 0f;
-            if (bb.IsGrounded && !bb.IsClimbing && bb.Step.CanHop && !bb.RecentlyExhausted && CDReady("Hop"))
+            if (!bb.IsClimbing && bb.Step.CanHop && !bb.RecentlyExhausted && CDReady("Hop"))
             {
                 // Favor modest heights and some lateral agreement; keep it simple (0.6 baseline).
                 float h = Mathf.InverseLerp(0.10f, 0.60f, bb.Step.Height);
@@ -73,14 +73,19 @@ namespace Peak.BotClone
             float wa = 0f;
             if (bb.IsGrounded && !bb.IsClimbing && bb.Wall.CanAttach && bb.StaminaRegular >= _attachAbs && CDReady("WallAttach"))
             {
-                float detourCurve = Mathf.InverseLerp(_detourFactor, _detourFactor * 2f, bb.DetourRatio);
+                float detourCurve = Mathf.InverseLerp(_detourFactor * 0.8f, _detourFactor * 2f, bb.DetourRatio);
                 wa = detourCurve;
 
                 // Prefer ground if a complete nav path exists.
-                if (bb.NavPathComplete) wa *= 0.2f;
+                if (bb.NavPathComplete)
+                    wa *= 0.6f;
+
+                if (bb.Wall.PlanarDist > 0f && bb.Wall.PlanarDist <= 0.6f)
+                    wa = Mathf.Max(wa, 0.18f);
 
                 // If stamina is only barely above climb threshold, be cautious.
-                if (bb.StaminaFrac < _climbFrac) wa *= 0.5f;
+                    if (bb.StaminaFrac < _climbFrac)
+                    wa *= 0.5f;
             }
             if (wa > 0f)
             {

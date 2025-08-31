@@ -21,7 +21,7 @@ namespace Peak.BotClone
         private const float DETOUR_RECALC_PERIOD = 0.35f;
 
         private const float STEP_PROBE_DIST = 0.9f;
-        private const float STEP_MAX_HOP = 0.60f;
+        private const float STEP_MAX_HOP = 0.75f;
         private const float STEP_MIN_HOP = 0.12f;
         private const float STEP_LATERAL = 0.30f;
 
