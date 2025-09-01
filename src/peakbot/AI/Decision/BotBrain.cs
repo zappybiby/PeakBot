@@ -15,7 +15,6 @@ namespace Peak.BotClone
         public float Strafe;
     }
 
-
     internal sealed class BotBrain
     {
         // Thresholds come from GraphFollower so tuning stays consistent.
@@ -60,7 +59,14 @@ namespace Peak.BotClone
 
             // --- Hop (for small steps) ---
             float hop = 0f;
-            if (!bb.IsClimbing && bb.Step.CanHop && !bb.RecentlyExhausted && CDReady("Hop"))
+            if (!bb.IsClimbing &&
+                bb.Step.CanHop &&
+                !bb.RecentlyExhausted &&
+                // don't hop unless reasonably fresh; hopping near cliffs just drains stamina
+                bb.StaminaFrac >= Mathf.Max(_sprintFrac, 0.45f) &&
+                // avoid hop when detour is huge/∞ (likely at cliff edge)
+                float.IsFinite(bb.DetourRatio) && bb.DetourRatio <= _detourFactor * 1.6f &&
+                CDReady("Hop"))
             {
                 // Favor modest heights and some lateral agreement; keep it simple (0.6 baseline).
                 float h = Mathf.InverseLerp(0.10f, 0.60f, bb.Step.Height);
@@ -71,21 +77,26 @@ namespace Peak.BotClone
 
             // --- WallAttach (jump-then-attach) ---
             float wa = 0f;
-            if (bb.IsGrounded && !bb.IsClimbing && bb.Wall.CanAttach && bb.StaminaRegular >= _attachAbs && CDReady("WallAttach"))
+            if (bb.IsGrounded &&
+                !bb.IsClimbing &&
+                bb.Wall.CanAttach &&
+                // allow attach with either enough fraction OR absolute reserve
+                (bb.StaminaFrac >= _climbFrac || bb.StaminaRegular >= _attachAbs) &&
+                CDReady("WallAttach"))
             {
-                float detourCurve = Mathf.InverseLerp(_detourFactor * 0.8f, _detourFactor * 2f, bb.DetourRatio);
+                // detour-driven willingness to climb
+                float detourCurve = Mathf.InverseLerp(_detourFactor, _detourFactor * 2f, bb.DetourRatio);
                 wa = detourCurve;
 
                 // Prefer ground if a complete nav path exists.
-                if (bb.NavPathComplete)
-                    wa *= 0.6f;
+                if (bb.NavPathComplete) wa *= 0.2f;
 
+                // Close wall in front gets a minimal baseline.
                 if (bb.Wall.PlanarDist > 0f && bb.Wall.PlanarDist <= 0.6f)
                     wa = Mathf.Max(wa, 0.18f);
 
                 // If stamina is only barely above climb threshold, be cautious.
-                    if (bb.StaminaFrac < _climbFrac)
-                    wa *= 0.5f;
+                if (bb.StaminaFrac < _climbFrac) wa *= 0.5f;
             }
             if (wa > 0f)
             {
@@ -101,17 +112,40 @@ namespace Peak.BotClone
                 wa *= anglePenalty;
             }
 
+            // Climb-first bias:
+            // - if ground route is poor/unknown (no complete path, detour ∞/very high)
+            // - or the player is above us, prefer to climb proactively.
+            if (!bb.NavPathComplete || float.IsInfinity(bb.DetourRatio) || bb.DetourRatio >= _detourFactor * 1.8f)
+            {
+                wa = Mathf.Max(wa, 0.55f);
+            }
+            float upDelta = bb.PlayerPos.y - bb.SelfPos.y;
+            if (upDelta > 1.0f)
+            {
+                float t = Mathf.InverseLerp(1f, 5f, upDelta);
+                wa = Mathf.Max(wa, Mathf.Lerp(wa, 0.80f, t));
+            }
+
             scores["WallAttach"] = wa;
 
             // --- GapJump (jump over a gap if landing looks valid) ---
             float gj = 0f;
-            if (bb.IsGrounded && !bb.IsClimbing && bb.Gap.HasLanding && bb.StaminaFrac >= _sprintFrac && CDReady("GapJump"))
+            if (bb.IsGrounded &&
+                !bb.IsClimbing &&
+                bb.Gap.HasLanding &&
+                bb.StaminaFrac >= _sprintFrac &&
+                CDReady("GapJump") &&
+                // prefer climbing over gap if wall is right here
+                !bb.Wall.CanAttach &&
+                // don't choose gap as a "fix" for infinite detour at cliff edges
+                !float.IsInfinity(bb.DetourRatio))
             {
                 float detourCurve = Mathf.InverseLerp(_detourFactor, _detourFactor * 1.8f, bb.DetourRatio);
                 float distPref    = Mathf.InverseLerp(0.8f, 4.0f, Mathf.Clamp(bb.Gap.Distance, 0.8f, 4f));
                 gj = 0.5f * detourCurve + 0.5f * distPref;
 
-                if (bb.NavPathComplete) gj *= 0.25f; // ground path exists; only jump if it's clearly better
+                // ground path exists; only jump if it's clearly better
+                if (bb.NavPathComplete) gj *= 0.25f;
             }
             scores["GapJump"] = gj;
 
@@ -122,7 +156,6 @@ namespace Peak.BotClone
             var (bestName, bestScore) = Max(scores);
 
             var d = new BotDecision { Scores = scores };
-            // AI/Decision/BotBrain.cs  (inside Evaluate, after switch(bestName))
             switch (bestName)
             {
                 case "Rest":
@@ -138,7 +171,7 @@ namespace Peak.BotClone
                 case "Hop":
                     d.Type = BotActionType.Hop;
                     d.Why  = $"step {bb.Step.Height:F2}m canHop; lateral={bb.Step.LateralAgree}";
-                    SetCD("Hop", 0.25f);
+                    SetCD("Hop", 0.60f); // longer cooldown to avoid stamina pinball
                     break;
 
                 case "WallAttach":
@@ -158,7 +191,7 @@ namespace Peak.BotClone
                     d.Type = BotActionType.Follow;
                     d.Why  = "default follow";
 
-                    // NEW: only the brain decides to strafe; movement layer just executes it smoothly.
+                    // Only the brain decides to strafe; movement layer just executes it smoothly.
                     if (bb.IsGrounded && !bb.IsClimbing && bb.Step.CanHop &&
                         (bb.Step.LateralAgree == -1 || bb.Step.LateralAgree == 1))
                     {
@@ -167,7 +200,6 @@ namespace Peak.BotClone
                     }
                     break;
             }
-
 
             return d;
         }
